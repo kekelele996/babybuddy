@@ -56,7 +56,7 @@
                             </td>
                         {% endif %}
                         <td>
-                            {% if note.image %}
+                            {% if note.has_image %}
                                 {% thumbnail '40x40' note.image as thumb %}
                                     <a href="{{ note.image.url }}" target="_blank">
                                         <img src="{{ thumb.url }}" class="img-fluid" />

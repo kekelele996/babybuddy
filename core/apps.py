@@ -120,3 +120,6 @@ class CoreConfig(AppConfig):
             add_caregiver_group_permissions,
             dispatch_uid="core.add_caregiver_group_permissions",
         )
+        # Imported for its side effects: the receivers release uploaded
+        # images when a row's image is replaced or the row is deleted.
+        from core import signals  # noqa: F401

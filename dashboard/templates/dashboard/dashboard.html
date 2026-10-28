@@ -17,7 +17,7 @@
                     <div class="col-lg-4 col-md-6 col-sm-6 col-xs-2 mb-4">
                         <div class="card">
                             <a class="text-center" href="{% url 'core:child' object.slug %}">
-                                {% if object.picture %}
+                                {% if object.has_picture %}
                                     {% thumbnail '300x300' object.picture as thumb %}
                                         <img src="{{ thumb.url }}" class="child-photo img-fluid" />
                                     {% else %}

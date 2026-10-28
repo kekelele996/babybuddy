@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.conf import settings
 
 from import_export import fields, resources
@@ -318,3 +318,50 @@ class TagAdmin(ImportExportMixin, ExportActionMixin, admin.ModelAdmin):
     search_fields = ("name", "color")
     prepopulated_fields = {"slug": ["name"]}
     resource_class = TagImportExportResource
+
+
+@admin.register(models.PendingFileDeletion)
+class PendingFileDeletionAdmin(admin.ModelAdmin):
+    """Read-only view of files whose cleanup failed, with a manual retry."""
+
+    actions = ["retry_deletions"]
+    list_display = (
+        "path",
+        "attempts",
+        "last_error",
+        "created_at",
+        "updated_at",
+    )
+    search_fields = ("path", "last_error")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    @admin.action(description="Retry selected file deletions")
+    def retry_deletions(self, request, queryset):
+        from core import images
+
+        released, deferred, kept = images.retry_pending_deletions(queryset)
+        if released:
+            self.message_user(
+                request,
+                f"{released} file(s) deleted.",
+                level=messages.SUCCESS,
+            )
+        if kept:
+            self.message_user(
+                request,
+                f"{kept} file(s) kept because they are referenced again.",
+                level=messages.WARNING,
+            )
+        if deferred:
+            self.message_user(
+                request,
+                f"{deferred} file(s) still could not be deleted.",
+                level=messages.ERROR,
+            )
+        if not (released or deferred or kept):
+            self.message_user(request, "No files selected.", level=messages.WARNING)

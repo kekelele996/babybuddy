@@ -16,6 +16,7 @@ from taggit.managers import TaggableManager as TaggitTaggableManager
 from taggit.models import GenericTaggedItemBase, TagBase
 
 from babybuddy.site_settings import NapSettings, FeedingSettings
+from core.images import validate_uploaded_image
 from core.utils import random_color, timezone_aware_duration
 
 
@@ -221,7 +222,11 @@ class Child(models.Model):
         verbose_name=_("Slug"),
     )
     picture = models.ImageField(
-        blank=True, null=True, upload_to="child/picture/", verbose_name=_("Picture")
+        blank=True,
+        null=True,
+        upload_to="child/picture/",
+        validators=[validate_uploaded_image],
+        verbose_name=_("Picture"),
     )
 
     objects = models.Manager()
@@ -259,6 +264,25 @@ class Child(models.Model):
                 datetime.datetime.combine(self.birth_date, self.birth_time)
             )
         return self.birth_date
+
+    def has_picture(self):
+        """
+        True when a picture is assigned *and* its file actually exists in
+        storage. A restored database can reference files that were never
+        restored, so the field name alone is not proof that the image can be
+        displayed. Result is memoized on the instance for the duration of a
+        request and reset by the image signals whenever the row is saved.
+        """
+        if "_picture_exists" not in self.__dict__:
+            picture = self.picture
+            try:
+                exists = bool(picture.name) and picture.storage.exists(picture.name)
+            except Exception:
+                # Storage being unreachable must not break rendering; leave the
+                # usual image markup in place rather than the placeholder.
+                exists = bool(picture.name)
+            self.__dict__["_picture_exists"] = exists
+        return self.__dict__["_picture_exists"]
 
     @classmethod
     def count(cls):
@@ -490,7 +514,11 @@ class Note(models.Model):
         blank=False, default=timezone.localtime, verbose_name=_("Time")
     )
     image = models.ImageField(
-        blank=True, null=True, upload_to="notes/images/", verbose_name=_("Image")
+        blank=True,
+        null=True,
+        upload_to="notes/images/",
+        validators=[validate_uploaded_image],
+        verbose_name=_("Image"),
     )
     tags = TaggableManager(blank=True, through=Tagged)
 
@@ -504,6 +532,22 @@ class Note(models.Model):
 
     def __str__(self):
         return str(_("Note"))
+
+    def has_image(self):
+        """
+        True when an image is assigned *and* its file exists in storage.
+
+        See :meth:`Child.has_picture` for why the field name alone is not
+        enough (a restore can leave rows pointing at missing files).
+        """
+        if "_image_exists" not in self.__dict__:
+            image = self.image
+            try:
+                exists = bool(image.name) and image.storage.exists(image.name)
+            except Exception:
+                exists = bool(image.name)
+            self.__dict__["_image_exists"] = exists
+        return self.__dict__["_image_exists"]
 
 
 class Pumping(models.Model):
@@ -913,3 +957,34 @@ class WeightPercentile(models.Model):
 
     def __str__(self):
         return f"Sex: {self.sex}, Age: {self.age_in_days} days, p3: {self.p3_weight} kg, p15: {self.p15_weight} kg, p50: {self.p50_weight} kg, p85: {self.p85_weight} kg, p97: {self.p97_weight} kg"
+
+
+class PendingFileDeletion(models.Model):
+    """
+    Storage-relative name of an uploaded file whose deletion failed.
+
+    Rows are created by ``core.images.release_image_file`` (e.g. when the
+    storage backend was temporarily unavailable) and retried by the same
+    module -- manually from the admin or through the ``cleanup_images``
+    management command. Keeping the state in the database means a failed
+    cleanup survives restarts instead of silently leaving orphaned files.
+    """
+
+    path = models.CharField(max_length=512, unique=True, verbose_name=_("Storage path"))
+    attempts = models.PositiveIntegerField(default=0, verbose_name=_("Attempts"))
+    last_error = models.CharField(
+        blank=True, default="", max_length=1000, verbose_name=_("Last error")
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Created at"))
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_("Updated at"))
+
+    objects = models.Manager()
+
+    class Meta:
+        default_permissions = ("view", "add", "change", "delete")
+        ordering = ["-created_at"]
+        verbose_name = _("Pending file deletion")
+        verbose_name_plural = _("Pending file deletions")
+
+    def __str__(self):
+        return self.path

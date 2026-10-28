@@ -11,7 +11,7 @@
     <div class="child-detail-column">
         <div class="row">
             <div class="col-lg-4 col-md-6 pb-3 text-center">
-                {% if object.picture %}
+                {% if object.has_picture %}
                     {% thumbnail '150x150' object.picture as thumb %}
                         <img src="{{ thumb.url }}" class="child-photo img-fluid rounded-circle" />
                     {% else %}

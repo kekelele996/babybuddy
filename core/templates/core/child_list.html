@@ -33,7 +33,7 @@
                 {% for child in object_list %}
                     <tr>
                         <td>
-                            {% if child.picture %}
+                            {% if child.has_picture %}
                                 {% include "core/child_thumbnail.html" %}
                             {% else %}
                                 <img src="{% static 'babybuddy/img/core/child-placeholder.png' %}"

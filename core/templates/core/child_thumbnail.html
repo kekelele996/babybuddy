@@ -1,5 +1,5 @@
 {% load imagekit static %}
-{% if child.picture %}
+{% if child.has_picture %}
     {% thumbnail '40x40' child.picture as thumb %}
         <img src="{{ thumb.url }}" class="img-fluid rounded-circle" />
     {% else %}

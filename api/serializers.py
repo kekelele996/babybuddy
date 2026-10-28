@@ -14,6 +14,7 @@ from django.utils import timezone
 from taggit.serializers import TagListSerializerField, TaggitSerializer
 
 from core import models
+from core.images import validate_uploaded_image
 from babybuddy import models as babybuddy_models
 from webhooks import models as webhooks_models
 
@@ -163,6 +164,14 @@ class PumpingSerializer(CoreModelWithDurationSerializer, TaggableSerializer):
 
 
 class ChildSerializer(serializers.HyperlinkedModelSerializer):
+    # Declared explicitly so a replacement picture is fully verified before
+    # it is accepted, matching the validation of the web forms.
+    picture = serializers.ImageField(
+        required=False,
+        allow_null=True,
+        validators=[validate_uploaded_image],
+    )
+
     class Meta:
         model = models.Child
         fields = (
@@ -241,6 +250,14 @@ class MedicationSerializer(CoreModelSerializer, TaggableSerializer):
 
 
 class NoteSerializer(CoreModelSerializer, TaggableSerializer):
+    # Declared explicitly so a replacement image is fully verified before it
+    # is accepted, matching the validation of the web forms.
+    image = serializers.ImageField(
+        required=False,
+        allow_null=True,
+        validators=[validate_uploaded_image],
+    )
+
     class Meta:
         model = models.Note
         fields = ("id", "child", "note", "image", "time", "tags")

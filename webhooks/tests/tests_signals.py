@@ -72,6 +72,8 @@ class WebhookSignalTestCase(TestCase):
             models.Tagged,
             models.HeightPercentile,
             models.WeightPercentile,
+            # Internal storage bookkeeping, not a user-facing record.
+            models.PendingFileDeletion,
         }
         for candidate in apps.get_app_config("core").get_models():
             if not issubclass(candidate, Model):
