@@ -514,6 +514,81 @@ class Timeline(LoginRequiredMixin, TemplateView):
         return context
 
 
+class TimeShiftView(LoginRequiredMixin, FormView):
+    """
+    Two-step bulk adjustment of period-based entry times. The first POST
+    previews the shift (entries, overlaps, future periods); the confirming
+    POST re-checks everything and applies it atomically or changes nothing.
+    """
+
+    form_class = forms.TimeShiftForm
+    template_name = "core/time_shift_form.html"
+    preview_template_name = "core/time_shift_preview.html"
+    change_permissions = tuple(
+        permission for _key, _model, permission in forms.TIME_SHIFT_ENTRIES
+    )
+
+    def dispatch(self, request, *args, **kwargs):
+        # Anonymous users are sent to the login page; authenticated users
+        # without any of the change permissions receive a 403.
+        if not request.user.is_authenticated or not any(
+            request.user.has_perm(perm) for perm in self.change_permissions
+        ):
+            return self.handle_no_permission()
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def render_preview(self, form, plan):
+        return self.response_class(
+            request=self.request,
+            template=self.preview_template_name,
+            context={"form": form, "plan": plan},
+        )
+
+    def form_valid(self, form):
+        if "confirm" in self.request.POST:
+            try:
+                plan = form.execute()
+            except ValidationError as error:
+                # The database may have changed since the preview; the freshly
+                # planned preview shows whatever now blocks the shift.
+                form.add_error(None, error)
+                return self.render_preview(form, form.plan())
+            messages.success(
+                self.request,
+                _(
+                    "%(count)d entries for %(child)s shifted %(hours)+d hours."
+                )
+                % {
+                    "count": plan["total"],
+                    "child": plan["child"],
+                    "hours": int(plan["delta"].total_seconds() // 3600),
+                },
+            )
+            return HttpResponseRedirect(
+                reverse("core:child", args=[plan["child"].slug])
+            )
+
+        plan = form.plan()
+        if plan["total"] == 0:
+            form.add_error(
+                None,
+                ValidationError(
+                    _(
+                        "No entries of the selected types start in this date "
+                        "range."
+                    ),
+                    code="empty_selection",
+                ),
+            )
+            return self.form_invalid(form)
+        return self.render_preview(form, plan)
+
+
 class TimerList(PermissionRequiredMixin, BabyBuddyPaginatedView, BabyBuddyFilterView):
     model = models.Timer
     template_name = "core/timer_list.html"

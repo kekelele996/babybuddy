@@ -1,0 +1,163 @@
+{% extends "babybuddy/page.html" %}
+{% load datetime i18n %}
+{% block title %}
+    {% trans "Review time shift" %}
+{% endblock %}
+{% block breadcrumbs %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'core:time-adjust' %}">{% trans "Adjust Times" %}</a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">{% trans "Review" %}</li>
+{% endblock %}
+{% block content %}
+    <h1>{% trans "Review time shift" %}</h1>
+    {% if form.non_field_errors %}
+        <div class="alert alert-danger" role="alert">
+            {{ form.non_field_errors }}
+        </div>
+    {% endif %}
+
+    <dl class="row">
+        <dt class="col-sm-2">{% trans "Child" %}</dt>
+        <dd class="col-sm-10">{{ plan.child }}</dd>
+        <dt class="col-sm-2">{% trans "Date range" %}</dt>
+        <dd class="col-sm-10">
+            {{ form.cleaned_data.start_date|date:"Y-m-d" }} –
+            {{ form.cleaned_data.end_date|date:"Y-m-d" }}
+        </dd>
+        <dt class="col-sm-2">{% trans "Shift" %}</dt>
+        <dd class="col-sm-10">
+            {% blocktrans count counter=plan.hours %}{{ counter }} hour{% plural %}{{ counter }} hours{% endblocktrans %}
+            <span class="text-body-secondary">
+                {% if plan.hours > 0 %}
+                    ({% trans "entries move later" %})
+                {% else %}
+                    ({% trans "entries move earlier" %})
+                {% endif %}
+            </span>
+        </dd>
+        <dt class="col-sm-2">{% trans "Entries" %}</dt>
+        <dd class="col-sm-10">{{ plan.total }}</dd>
+    </dl>
+
+    {% if plan.conflicts %}
+        <div class="alert alert-danger" role="alert">
+            <h2 class="h5">
+                {% blocktrans count counter=plan.conflicts|length %}
+                    {{ counter }} overlapping time period
+                {% plural %}
+                    {{ counter }} overlapping time periods
+                {% endblocktrans %}
+            </h2>
+            <p class="mb-2">{% trans "The entries below would overlap entries that are not moving. The shift can not be applied until these are resolved." %}</p>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th>{% trans "Type" %}</th>
+                            <th>{% trans "Moving entry" %}</th>
+                            <th>{% trans "Conflicting entry" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for conflict in plan.conflicts %}
+                            <tr>
+                                <td>{{ conflict.label }}</td>
+                                <td>
+                                    <a href="{{ conflict.moving_url }}">#{{ conflict.moving.pk }}</a>
+                                    <br>
+                                    <span class="text-body-secondary">{{ conflict.moving.start|datetime_short }} – {{ conflict.moving.end|datetime_short }}</span>
+                                    <br>
+                                    <strong>{{ conflict.new_start|datetime_short }} – {{ conflict.new_end|datetime_short }}</strong>
+                                </td>
+                                <td>
+                                    <a href="{{ conflict.obstacle_url }}">#{{ conflict.obstacle.pk }}</a>
+                                    <br>
+                                    <span class="text-body-secondary">{{ conflict.obstacle.start|datetime_short }} – {{ conflict.obstacle.end|datetime_short }}</span>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    {% endif %}
+
+    {% if plan.future %}
+        <div class="alert alert-warning" role="alert">
+            <h2 class="h5">
+                {% blocktrans count counter=plan.future|length %}
+                    {{ counter }} entry would be moved into the future
+                {% plural %}
+                    {{ counter }} entries would be moved into the future
+                {% endblocktrans %}
+            </h2>
+            <ul class="mb-0">
+                {% for item in plan.future %}
+                    <li>
+                        {{ item.label }}
+                        <a href="{% url 'core:child' plan.child.slug %}">#{{ item.entry.pk }}</a>:
+                        {{ item.entry.start|datetime_short }} →
+                        <strong>{{ item.new_start|datetime_short }}</strong>
+                    </li>
+                {% endfor %}
+            </ul>
+        </div>
+    {% endif %}
+
+    {% for group in plan.groups %}
+        {% if group.rows %}
+            <h2 class="h4">{{ group.label }} ({{ group.rows|length }})</h2>
+            <div class="table-responsive">
+                <table class="table table-sm table-striped align-middle">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>{% trans "Current period" %}</th>
+                            <th></th>
+                            <th>{% trans "New period" %}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in group.rows %}
+                            <tr>
+                                <td>{{ row.entry.pk }}</td>
+                                <td>{{ row.entry.start|datetime_short }} – {{ row.entry.end|datetime_short }}</td>
+                                <td><i class="icon-update" aria-hidden="true"></i></td>
+                                <td>{{ row.new_start|datetime_short }} – {{ row.new_end|datetime_short }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% endif %}
+    {% endfor %}
+
+    {% if plan.conflicts or plan.future %}
+        <a href="{% url 'core:time-adjust' %}" class="btn btn-default btn-lg">
+            {% trans "Back" %}
+        </a>
+    {% else %}
+        <form role="form" method="post">
+            {% csrf_token %}
+            <input type="hidden" name="child" value="{{ form.cleaned_data.child.pk }}">
+            <input type="hidden"
+                   name="start_date"
+                   value="{{ form.cleaned_data.start_date|date:"Y-m-d" }}">
+            <input type="hidden"
+                   name="end_date"
+                   value="{{ form.cleaned_data.end_date|date:"Y-m-d" }}">
+            <input type="hidden" name="hours" value="{{ form.cleaned_data.hours }}">
+            {% for entry_type in form.cleaned_data.entry_types %}
+                <input type="hidden" name="entry_types" value="{{ entry_type }}">
+            {% endfor %}
+            <input type="hidden" name="confirm" value="1">
+            <button type="submit" class="btn btn-warning btn-lg">
+                {% trans "Confirm shift" %}
+            </button>
+            <a href="{% url 'core:time-adjust' %}" class="btn btn-default btn-lg">
+                {% trans "Cancel" %}
+            </a>
+        </form>
+    {% endif %}
+{% endblock %}

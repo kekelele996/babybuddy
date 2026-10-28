@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
+import datetime
+
 from django import forms
 from django.forms import widgets
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -624,3 +627,264 @@ class WeightForm(CoreModelForm, TaggableModelForm):
             "date": DateInput(),
             "notes": forms.Textarea(attrs={"rows": 5}),
         }
+
+
+#: Entry kinds with a start/end period supported by the bulk time adjustment.
+#: Overlap validation is per kind, so each kind is planned independently.
+#: Tuple fields: choice key, model, the permission required to move the kind.
+TIME_SHIFT_ENTRIES = (
+    ("feeding", models.Feeding, "core.change_feeding"),
+    ("sleep", models.Sleep, "core.change_sleep"),
+    ("pumping", models.Pumping, "core.change_pumping"),
+    ("tummytime", models.TummyTime, "core.change_tummytime"),
+)
+
+
+class TimeShiftForm(forms.Form):
+    """
+    Parameters for moving a child's period-based entries by a fixed number of
+    hours. The form itself never saves; ``plan`` previews the move and
+    ``execute`` applies it atomically after re-checking the preview.
+    """
+
+    child = forms.ModelChoiceField(
+        label=_("Child"),
+        queryset=models.Child.objects.all(),
+        widget=ChildRadioSelect,
+        empty_label=None,
+    )
+    start_date = forms.DateField(label=_("Start date"), widget=DateInput())
+    end_date = forms.DateField(label=_("End date"), widget=DateInput())
+    hours = forms.IntegerField(
+        label=_("Shift (hours)"),
+        min_value=-23,
+        max_value=23,
+        widget=forms.NumberInput(),
+        help_text=_(
+            "Entries are moved by this many hours. Use a positive value to "
+            "move entries later and a negative value to move them earlier."
+        ),
+    )
+    entry_types = forms.MultipleChoiceField(
+        label=_("Entry types"),
+        widget=forms.CheckboxSelectMultiple(attrs={"class": "form-check-input"}),
+        choices=(),
+    )
+
+    def __init__(self, *args, user=None, **kwargs):
+        self.user = user
+        super().__init__(*args, **kwargs)
+        # Only kinds the user may actually change are offered.
+        self.allowed = {
+            key: model
+            for key, model, permission in TIME_SHIFT_ENTRIES
+            if user is None or user.has_perm(permission)
+        }
+        self.fields["entry_types"].choices = [
+            (key, model._meta.verbose_name) for key, model in self.allowed.items()
+        ]
+        # Everything the user may adjust is selected by default.
+        if not self.is_bound:
+            self.initial["entry_types"] = list(self.allowed)
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start = cleaned_data.get("start_date")
+        end = cleaned_data.get("end_date")
+        if start and end and end < start:
+            self.add_error(
+                "end_date",
+                forms.ValidationError(
+                    _("End date must be on or after the start date."),
+                    code="date_order",
+                ),
+            )
+        if cleaned_data.get("hours") == 0:
+            self.add_error(
+                "hours",
+                forms.ValidationError(
+                    _("A shift of zero hours changes nothing."),
+                    code="zero_shift",
+                ),
+            )
+        selected = cleaned_data.get("entry_types")
+        if selected and not set(selected).issubset(self.allowed):
+            self.add_error(
+                "entry_types",
+                forms.ValidationError(
+                    _("You may not adjust this entry type."),
+                    code="forbidden_type",
+                ),
+            )
+        return cleaned_data
+
+    def shift_delta(self):
+        return datetime.timedelta(hours=self.cleaned_data["hours"])
+
+    def range_bounds(self):
+        """Return the aware lower/upper datetimes of the selected dates."""
+        current_timezone = timezone.get_current_timezone()
+        lower = timezone.make_aware(
+            datetime.datetime.combine(
+                self.cleaned_data["start_date"], datetime.time.min
+            ),
+            current_timezone,
+        )
+        upper = timezone.make_aware(
+            datetime.datetime.combine(
+                self.cleaned_data["end_date"], datetime.time.max
+            ),
+            current_timezone,
+        )
+        return lower, upper
+
+    def selected_keys(self):
+        return [
+            key
+            for key, _model, _permission in TIME_SHIFT_ENTRIES
+            if key in self.cleaned_data.get("entry_types", [])
+        ]
+
+    def plan(self):
+        """
+        Build a preview of the shift: the entries that would move, any entry
+        whose new period would land in the future, and every overlap the move
+        would create against an entry outside the selection.
+
+        Entries moving together never collide with each other: a uniform
+        translation preserves their relative intervals.
+        """
+        child = self.cleaned_data["child"]
+        delta = self.shift_delta()
+        lower, upper = self.range_bounds()
+        now = timezone.now()
+
+        groups = []
+        conflicts = []
+        future = []
+
+        for key in self.selected_keys():
+            model = self.allowed[key]
+            label = model._meta.verbose_name
+            entries = list(
+                model.objects.filter(
+                    child=child, start__gte=lower, start__lte=upper
+                ).order_by("start")
+            )
+            # Everything that keeps its current position is a potential
+            # obstacle, including entries just outside the date range.
+            stationary = model.objects.filter(child=child).exclude(
+                pk__in=[entry.pk for entry in entries]
+            )
+            rows = []
+            for entry in entries:
+                new_start = entry.start + delta
+                new_end = entry.end + delta
+                row = {
+                    "entry": entry,
+                    "new_start": new_start,
+                    "new_end": new_end,
+                }
+                rows.append(row)
+                if new_start > now or new_end > now:
+                    future.append({"label": label, **row})
+                obstacle = (
+                    stationary.filter(start__lt=new_end, end__gt=new_start)
+                    .order_by("start")
+                    .first()
+                )
+                if obstacle:
+                    conflicts.append(
+                        {
+                            "label": label,
+                            "moving": entry,
+                            "new_start": new_start,
+                            "new_end": new_end,
+                            "moving_url": reverse(
+                                f"core:{model.model_name}-update", args=[entry.pk]
+                            ),
+                            "obstacle": obstacle,
+                            "obstacle_url": reverse(
+                                f"core:{model.model_name}-update",
+                                args=[obstacle.pk],
+                            ),
+                        }
+                    )
+            groups.append({"key": key, "label": label, "rows": rows})
+
+        return {
+            "child": child,
+            "delta": delta,
+            "lower": lower,
+            "upper": upper,
+            "hours": self.cleaned_data["hours"],
+            "groups": groups,
+            "conflicts": conflicts,
+            "future": future,
+            "total": sum(len(group["rows"]) for group in groups),
+        }
+
+    def lock_rows(self):
+        """
+        Lock every selected-kind row of the child for the duration of the
+        transaction, so a concurrent edit cannot invalidate the preview
+        between the check and the write.
+        """
+        child = self.cleaned_data["child"]
+        for key in self.selected_keys():
+            model = self.allowed[key]
+            list(
+                model.objects.select_for_update()
+                .filter(child=child)
+                .order_by("pk")
+            )
+
+    def apply(self, plan):
+        """Shift the planned rows. Caller is responsible for locking and
+        re-checking; save per row so durations refresh and update webhooks
+        fire."""
+        moved = 0
+        for group in plan["groups"]:
+            model = self.allowed[group["key"]]
+            for row in group["rows"]:
+                entry = model.objects.select_for_update().get(pk=row["entry"].pk)
+                entry.start = row["new_start"]
+                entry.end = row["new_end"]
+                entry.save(update_fields=["start", "end", "duration"])
+                moved += 1
+        return moved
+
+    def execute(self):
+        """
+        Re-plan against the current database state and apply the shift in one
+        transaction. Any future entry or overlap rolls back every row.
+        """
+        with transaction.atomic():
+            self.lock_rows()
+            plan = self.plan()
+            if plan["total"] == 0:
+                raise forms.ValidationError(
+                    _(
+                        "No entries of the selected types start in this date "
+                        "range."
+                    ),
+                    code="empty_selection",
+                )
+            if plan["future"]:
+                raise forms.ValidationError(
+                    _(
+                        "The shift would move one or more entries into the "
+                        "future. Adjust the shift and try again."
+                    ),
+                    code="future_period",
+                )
+            if plan["conflicts"]:
+                raise forms.ValidationError(
+                    _(
+                        "The shift would overlap existing entries. Resolve the "
+                        "conflicts listed below and try again."
+                    ),
+                    code="period_intersection",
+                )
+            self.apply(plan)
+        return plan

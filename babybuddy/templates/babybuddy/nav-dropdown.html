@@ -320,6 +320,13 @@
                                     {% trans "Tummy Time entry" %}
                                 </a>
                             {% endif %}
+                            {% if perms.core.change_feeding or perms.core.change_sleep or perms.core.change_pumping or perms.core.change_tummytime %}
+                                <div class="dropdown-divider"></div>
+                                <a class="dropdown-item{% if request.path == '/adjust/' %} active{% endif %}"
+                                   href="{% url 'core:time-adjust' %}"><i class="icon-timeline" aria-hidden="true"></i>
+                                    {% trans "Adjust Times" %}
+                                </a>
+                            {% endif %}
                         </div>
                     </li>
                     {% if perms.core.view_timer %}

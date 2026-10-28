@@ -1,0 +1,60 @@
+{% extends "babybuddy/page.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Adjust Times" %}
+{% endblock %}
+{% block breadcrumbs %}
+    <li class="breadcrumb-item active" aria-current="page">{% trans "Adjust Times" %}</li>
+{% endblock %}
+{% block content %}
+    <h1>
+        <i class="icon-timeline" aria-hidden="true"></i>
+        {% trans "Adjust Times" %}
+    </h1>
+    <p class="text-body-secondary">
+        {% trans "Move feeding, sleep, pumping and tummy time entries of a date range by the same number of hours. Overlaps with entries outside the range are reported before anything is changed." %}
+    </p>
+    <div class="container-fluid pb-5">
+        <form role="form" method="post">
+            {% csrf_token %}
+            {% if form.non_field_errors %}
+                <div class="alert alert-danger" role="alert">
+                    {{ form.non_field_errors }}
+                </div>
+            {% endif %}
+            {% with field=form.child %}
+                {% include "babybuddy/form_field.html" %}
+            {% endwith %}
+            {% with field=form.start_date %}
+                {% include "babybuddy/form_field.html" %}
+            {% endwith %}
+            {% with field=form.end_date %}
+                {% include "babybuddy/form_field.html" %}
+            {% endwith %}
+            {% with field=form.hours %}
+                {% include "babybuddy/form_field.html" %}
+            {% endwith %}
+            <div class="row mb-3">
+                <label for="id_entry_types" class="col-sm-2 col-form-label">
+                    {{ form.entry_types.label }}
+                </label>
+                <div class="col-sm-10">
+                    {% if form.entry_types.errors %}
+                        <div class="alert alert-danger">{{ form.entry_types.errors }}</div>
+                    {% endif %}
+                    {% for choice in form.entry_types %}
+                        <div class="form-check">
+                            {{ choice.tag }}
+                            <label class="form-check-label" for="{{ choice.id_for_label }}">
+                                {{ choice.choice_label }}
+                            </label>
+                        </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-lg">
+                {% trans "Review shift" %}
+            </button>
+        </form>
+    </div>
+{% endblock %}
