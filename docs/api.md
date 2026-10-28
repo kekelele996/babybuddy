@@ -11,6 +11,7 @@ authorization.
 Currently, the following endpoints are available for `GET`, `OPTIONS`, and
 `POST` requests:
 
+- `/api/batch/` (batch of feedings and sleep)
 - `/api/bmi/` (Body Mass Index)
 - `/api/children/`
 - `/api/changes/` (Diaper Changes)
@@ -257,6 +258,50 @@ Also note that the timer has been deleted.
 Returns JSON data in the response body describing the added/updated instance or
 error details keyed by either the field in error or the general string `non_field_errors`
 (e.g., when validation involves multiple fields).
+
+### Batch submissions
+
+Several feedings and sleep entries can be sent together to `/api/batch/`
+instead of posting each one separately:
+
+```shell
+curl -X POST '[...]/api/batch/' \
+--header 'Authorization: Token [...]' \
+--header 'Content-Type: application/json' \
+--data '{
+  "idempotency_key": "2026-09-23-household-1",
+  "entries": [
+    {"kind": "feeding", "child": 1, "start": "...", "end": "...", "type": "breast milk", "method": "left breast"},
+    {"kind": "sleep", "child": 1, "start": "...", "end": "..."}
+  ]
+}'
+```
+
+Each entry carries a `kind` of `feeding` or `sleep` -- `kind`, not `type`,
+because a feeding already has a field called `type` -- followed by the same
+fields the single endpoints accept, including `timer`.
+
+The whole batch is checked before anything is written. If an entry is invalid,
+the response is `400 Bad Request` with the errors keyed by the entry index:
+
+```json
+{"entries": {"1": {"end": ["This field is required."]}}}
+```
+
+A batch with an invalid entry writes nothing: entries and timers are only
+changed once every entry is valid, and then all entries are written in one
+transaction, so the batch either lands whole or not at all. Two entries may not
+use the same timer, and two entries of the same kind for the same child may not
+overlap; those are reported by index as well.
+
+`idempotency_key` is a value the client chooses and keeps for a batch. Sending
+the batch again with the same key returns the result of the first submission --
+the same created entries -- instead of writing them again. That is what makes a
+retry after a network timeout safe: the entries are created once, the timers
+they use are stopped once, and the webhook announcement is sent once. Reusing a
+key with a different payload is rejected with `409 Conflict`. A submitted batch
+can be read back at `/api/batch/<id>/`, which is also what a `batch.created`
+webhook points at; batches are visible only to the user who submitted them.
 
 ## `PATCH` Method
 

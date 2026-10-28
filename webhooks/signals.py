@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+import contextlib
 import logging
+import threading
 
 from django.db import transaction
 from django.db.models.signals import post_delete, post_save
@@ -10,6 +12,36 @@ from core import models as core_models
 from webhooks.models import WebhookEndpoint, WebhookEvent
 
 logger = logging.getLogger(__name__)
+
+#: Suppression state for the calling thread. A batch write holds this while its
+#: entries are saved: none of the entries (or the timers they consume) is
+#: announced on its own -- the batch announces itself once, afterwards. The
+#: state is thread-local because requests run on their own threads, and it uses
+#: a depth counter so nested blocks do not switch each other's suppression off.
+_state = threading.local()
+
+
+def events_are_suppressed():
+    """Whether event recording is currently switched off for this thread."""
+    return getattr(_state, "depth", 0) > 0
+
+
+@contextlib.contextmanager
+def suppress_events():
+    """
+    Run a block without queuing webhook events for its changes.
+
+    Used by a batch submission, which announces the batch as a whole with a
+    single event instead of one event per entry. Code that still wants an event
+    while suppression is in force calls :func:`record_event` directly, as the
+    batch does once all of its entries are saved.
+    """
+    _state.depth = getattr(_state, "depth", 0) + 1
+    try:
+        yield
+    finally:
+        _state.depth -= 1
+
 
 #: The records worth announcing. Percentiles are left out because they are
 #: computed rather than written, and announcing them would send an event for
@@ -71,13 +103,13 @@ def record_event(instance, verb):
 
 @receiver(post_save, dispatch_uid="webhooks.record_event_on_save")
 def record_event_on_save(sender, instance, created, **kwargs):
-    if sender not in WATCHED:
+    if events_are_suppressed() or sender not in WATCHED:
         return
     record_event(instance, "created" if created else "updated")
 
 
 @receiver(post_delete, dispatch_uid="webhooks.record_event_on_delete")
 def record_event_on_delete(sender, instance, **kwargs):
-    if sender not in WATCHED:
+    if events_are_suppressed() or sender not in WATCHED:
         return
     record_event(instance, "deleted")

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from django.apps import apps
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.db import DatabaseError, transaction
 from django.test import TestCase
@@ -148,6 +149,48 @@ class WebhookSignalTestCase(TestCase):
         # Saving an event is not itself an event, or every delivery would queue
         # the next one.
         self.assertEqual(WebhookEvent.objects.count(), before + 1)
+
+    def test_a_suppressed_save_is_not_announced(self):
+        before = WebhookEvent.objects.count()
+        with signals.suppress_events():
+            models.Feeding.objects.create(
+                child=self.child,
+                start=timezone.localtime(),
+                end=timezone.localtime(),
+                type="formula",
+            )
+        self.assertEqual(WebhookEvent.objects.count(), before)
+
+        # Suppression is lifted again afterwards.
+        models.Feeding.objects.create(
+            child=self.child,
+            start=timezone.localtime(),
+            end=timezone.localtime(),
+            type="formula",
+        )
+        self.assertEqual(WebhookEvent.objects.count(), before + 1)
+
+    def test_suppression_covers_a_deleted_timer(self):
+        # A batch entry consumes its timer while events are suppressed, so the
+        # timer's deletion must not announce either.
+        user = get_user_model().objects.create_user(username="timer-user")
+        timer = models.Timer.objects.create(
+            user=user,
+            child=self.child,
+            start=timezone.localtime(),
+        )
+        before = WebhookEvent.objects.count()
+        with signals.suppress_events():
+            timer.delete()
+        self.assertEqual(WebhookEvent.objects.count(), before)
+
+    def test_nested_suppression_is_lifted_in_order(self):
+        with signals.suppress_events():
+            with signals.suppress_events():
+                self.assertTrue(signals.events_are_suppressed())
+            # Still inside the outer block.
+            self.assertTrue(signals.events_are_suppressed())
+        self.assertFalse(signals.events_are_suppressed())
 
     def test_inactive_endpoints_are_skipped(self):
         self.endpoint.active = False

@@ -13,7 +13,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIRequestFactory, APITestCase
 
-from webhooks.models import WebhookEndpoint
+from api import models as api_models
+from webhooks.models import WebhookEndpoint, WebhookEvent
 
 
 class TestBase:
@@ -1701,3 +1702,258 @@ class TestSchemaAPITestCase(APITestCase):
         names = [parameter["name"] for parameter in parameters]
         for name in ("child", "start", "start_min", "end", "end_max", "tags"):
             self.assertIn(name, names)
+
+
+class BatchAPITestCase(APITestCase):
+    fixtures = ["tests.json"]
+    endpoint = reverse("api:batch-list")
+
+    def setUp(self):
+        self.client.login(username="admin", password="admin")
+        self.child = models.Child.objects.first()
+        self.feeding_count = models.Feeding.objects.count()
+        self.sleep_count = models.Sleep.objects.count()
+        self.payload = {
+            "idempotency_key": "batch-1",
+            "entries": [
+                {
+                    "kind": "feeding",
+                    "child": self.child.id,
+                    "start": "2017-12-01T08:00:00-05:00",
+                    "end": "2017-12-01T08:20:00-05:00",
+                    "type": "breast milk",
+                    "method": "left breast",
+                },
+                {
+                    "kind": "sleep",
+                    "child": self.child.id,
+                    "start": "2017-12-01T09:00:00-05:00",
+                    "end": "2017-12-01T10:30:00-05:00",
+                },
+                {
+                    "kind": "feeding",
+                    "child": self.child.id,
+                    "start": "2017-12-01T11:00:00-05:00",
+                    "end": "2017-12-01T11:15:00-05:00",
+                    "type": "formula",
+                    "method": "bottle",
+                    "amount": 2.0,
+                },
+            ],
+        }
+
+    def test_post_creates_the_whole_batch(self):
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["idempotency_key"], "batch-1")
+        self.assertEqual(
+            [entry["kind"] for entry in response.data["results"]],
+            ["feeding", "sleep", "feeding"],
+        )
+        self.assertEqual(response.data["results"][0]["duration"], "00:20:00")
+        self.assertEqual(response.data["results"][1]["duration"], "01:30:00")
+        self.assertEqual(response.data["results"][2]["duration"], "00:15:00")
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count + 2)
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count + 1)
+        self.assertEqual(api_models.Batch.objects.count(), 1)
+
+    def test_get_returns_the_stored_result(self):
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        batch_id = response.data["id"]
+        response = self.client.get(reverse("api:batch-detail", args=[batch_id]))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["id"], batch_id)
+        self.assertEqual(
+            [entry["kind"] for entry in response.data["results"]],
+            ["feeding", "sleep", "feeding"],
+        )
+
+    def test_an_invalid_entry_is_reported_by_index(self):
+        self.payload["entries"][1].pop("end")
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("1", response.data["entries"])
+        self.assertIn("end", response.data["entries"]["1"])
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count)
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count)
+        self.assertEqual(api_models.Batch.objects.count(), 0)
+
+    def test_an_unknown_kind_is_reported_by_index(self):
+        self.payload["entries"][0]["kind"] = "pumping"
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("kind", response.data["entries"]["0"])
+
+    def test_a_missing_kind_is_reported_by_index(self):
+        self.payload["entries"][0].pop("kind")
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("kind", response.data["entries"]["0"])
+
+    def test_missing_idempotency_key_is_rejected(self):
+        self.payload.pop("idempotency_key")
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("idempotency_key", response.data)
+
+    def test_empty_batch_is_rejected(self):
+        self.payload["entries"] = []
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("entries", response.data)
+
+    def test_retry_returns_the_first_result(self):
+        first = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        second = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.data, first.data)
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count + 2)
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count + 1)
+        self.assertEqual(api_models.Batch.objects.count(), 1)
+
+    def test_same_key_with_a_different_payload_conflicts(self):
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.payload["entries"][2]["amount"] = 3.0
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn("idempotency_key", response.data)
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count + 2)
+
+    def test_a_timer_is_consumed_once_across_a_retry(self):
+        start = timezone.now() - timezone.timedelta(minutes=10)
+        timer = models.Timer.objects.create(
+            user=get_user_model().objects.get(username="admin"),
+            child=self.child,
+            start=start,
+        )
+        self.payload["entries"][0] = {
+            "kind": "feeding",
+            "timer": timer.id,
+            "type": "breast milk",
+            "method": "left breast",
+        }
+        first = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(first.status_code, status.HTTP_201_CREATED)
+        self.assertFalse(models.Timer.objects.filter(pk=timer.pk).exists())
+        feeding = models.Feeding.objects.get(pk=first.data["results"][0]["id"])
+        self.assertEqual(feeding.start, start)
+
+        # The timer is gone now; the retry must still return the first result
+        # rather than failing on it, and must not create a second feeding.
+        second = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(second.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(second.data, first.data)
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count + 2)
+
+    def test_a_timer_used_by_two_entries_is_rejected(self):
+        start = timezone.now() - timezone.timedelta(minutes=10)
+        timer = models.Timer.objects.create(
+            user=get_user_model().objects.get(username="admin"),
+            child=self.child,
+            start=start,
+        )
+        self.payload["entries"][0] = {
+            "kind": "feeding",
+            "timer": timer.id,
+            "type": "breast milk",
+            "method": "left breast",
+        }
+        self.payload["entries"][2] = {
+            "kind": "feeding",
+            "timer": timer.id,
+            "type": "formula",
+            "method": "bottle",
+        }
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("timer", response.data["entries"]["2"])
+        self.assertTrue(models.Timer.objects.filter(pk=timer.pk).exists())
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count)
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count)
+
+    def test_overlapping_entries_within_the_batch_are_rejected(self):
+        # The later feeding overlaps the first one for the same child.
+        self.payload["entries"][2]["start"] = "2017-12-01T08:10:00-05:00"
+        self.payload["entries"][2]["end"] = "2017-12-01T08:30:00-05:00"
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("non_field_errors", response.data["entries"]["2"])
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count)
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count)
+
+    def test_the_batch_is_announced_once(self):
+        endpoint = WebhookEndpoint.objects.create(
+            name="Home", url="http://home.test/hook", secret="secret"
+        )
+        before = WebhookEvent.objects.count()
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        events = WebhookEvent.objects.filter(endpoint=endpoint)
+        self.assertEqual(events.count(), 1)
+        event = events.get()
+        self.assertEqual(event.type, "batch.created")
+        self.assertEqual(event.object_id, str(response.data["id"]))
+
+        # No per-entry events, and no event for the consumed timer when one
+        # is used. (Creating the timer announces it, so the count starts
+        # after that.)
+        start = timezone.now() - timezone.timedelta(minutes=10)
+        timer = models.Timer.objects.create(
+            user=get_user_model().objects.get(username="admin"),
+            child=self.child,
+            start=start,
+        )
+        before = WebhookEvent.objects.count()
+        payload = {
+            "idempotency_key": "batch-2",
+            "entries": [
+                {
+                    "kind": "feeding",
+                    "timer": timer.id,
+                    "type": "breast milk",
+                    "method": "left breast",
+                }
+            ],
+        }
+        self.assertEqual(
+            self.client.post(self.endpoint, payload, format="json").status_code,
+            status.HTTP_201_CREATED,
+        )
+        self.assertEqual(WebhookEvent.objects.count(), before + 1)
+        event_types = set(WebhookEvent.objects.values_list("type", flat=True))
+        self.assertNotIn("feeding.created", event_types)
+        self.assertNotIn("timer.deleted", event_types)
+
+        # A retry queues nothing new.
+        self.assertEqual(
+            self.client.post(self.endpoint, payload, format="json").status_code,
+            status.HTTP_201_CREATED,
+        )
+        self.assertEqual(WebhookEvent.objects.count(), before + 1)
+
+    def test_add_permission_is_required_for_each_kind(self):
+        user = get_user_model().objects.create_user(
+            username="caregiver", password="password"
+        )
+        self.client.login(username="caregiver", password="password")
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(models.Feeding.objects.count(), self.feeding_count)
+        self.assertEqual(models.Sleep.objects.count(), self.sleep_count)
+
+        user.user_permissions.add(
+            Permission.objects.get(codename="add_feeding"),
+            Permission.objects.get(codename="add_sleep"),
+        )
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_a_batch_is_private_to_its_user(self):
+        response = self.client.post(self.endpoint, self.payload, format="json")
+        batch_id = response.data["id"]
+        get_user_model().objects.create_user(username="other", password="password")
+        self.client.login(username="other", password="password")
+        response = self.client.get(reverse("api:batch-detail", args=[batch_id]))
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

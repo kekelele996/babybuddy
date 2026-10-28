@@ -163,6 +163,13 @@ want and drop the rest at the receiving end, so there is no filter to configure
 here and no way to end up with an endpoint that is quietly not being told about
 something you expected it to hear.
 
+A [batch submission](../api.md#batch-submissions) is announced differently:
+however many feedings and sleep entries it writes, and whatever timers it
+consumes, it produces one `batch.created` event rather than one per entry. The
+`object_id` is the batch id, and the created entries can be read back at
+`/api/batch/<id>/`. A retry of the same batch writes nothing again and queues
+nothing again, so the single event is not repeated either.
+
 ## What this does not do
 
 Webhooks are a notification, not a delivery guarantee. Two runs of the command

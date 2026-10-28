@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
+import hashlib
+import json
+
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.exceptions import PermissionDenied
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 
-from rest_framework import mixins, status, viewsets, views
+from rest_framework import mixins, permissions, status, viewsets, views
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.schemas.openapi import AutoSchema
@@ -11,6 +17,9 @@ from rest_framework.schemas.openapi import AutoSchema
 from core import models
 from babybuddy import models as babybuddy_models
 from webhooks import models as webhooks_models
+from webhooks import signals as webhooks_signals
+
+from api import models as api_models
 
 from . import serializers, filters
 
@@ -165,6 +174,152 @@ class WeightViewSet(viewsets.ModelViewSet):
     filterset_fields = ("child", "date")
     ordering_fields = ("date", "weight")
     ordering = "-date"
+
+
+class BatchViewSet(
+    mixins.CreateModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """
+    Write a batch of feeding and sleep entries as one submission.
+
+    Every entry is validated first and the response names any that fail by
+    their index; only a batch without an invalid entry is written, and it is
+    written inside one transaction, so either all entries land or none do.
+
+    The client supplies an idempotency key. A batch sent again with the same
+    key is not written a second time: the stored result of the first
+    submission is returned instead. That keeps a retry after a network
+    timeout from creating the entries, consuming their timers, and sending
+    their announcements twice. A key reused with a different payload is a
+    client error (409).
+
+    A successful batch announces itself once per active endpoint
+    ("batch.created"), rather than once per entry.
+    """
+
+    serializer_class = serializers.BatchSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    #: Adding an entry of a kind needs the same permission as posting one.
+    ADD_PERMISSIONS = {
+        "feeding": "core.add_feeding",
+        "sleep": "core.add_sleep",
+    }
+
+    def get_queryset(self):
+        return api_models.Batch.objects.filter(user=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        # The envelope alone is checked first: the idempotency lookup has to
+        # precede entry validation, since a retry of a batch that consumed a
+        # timer no longer has that timer to validate against.
+        envelope = serializers.BatchEnvelopeSerializer(data=request.data)
+        envelope.is_valid(raise_exception=True)
+        idempotency_key = envelope.validated_data["idempotency_key"]
+        fingerprint = self._fingerprint(request.data["entries"])
+
+        with transaction.atomic():
+            existing = self._get_existing(idempotency_key)
+            if existing is not None:
+                return self._replay(existing, fingerprint)
+
+            # The key is new, so now every entry has to prove it is valid.
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            prepared = serializer.validated_data["prepared"]
+
+            for kind in {kind for _, kind, _ in prepared}:
+                if not request.user.has_perm(self.ADD_PERMISSIONS[kind]):
+                    raise PermissionDenied(
+                        "You do not have permission to add {} entries.".format(kind)
+                    )
+
+            try:
+                # The unique constraint is the real guard against two requests
+                # submitting the same key at the same time; select_for_update
+                # cannot lock a row that does not exist yet.
+                with transaction.atomic():
+                    batch = api_models.Batch.objects.create(
+                        user=request.user,
+                        idempotency_key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
+            except IntegrityError:
+                return self._replay(self._get_existing(idempotency_key), fingerprint)
+
+            results = self._save_entries(prepared)
+            batch.result = self._response_body(batch, results)
+            batch.save(update_fields=["result"])
+            # Queued last and inside the transaction, so the announcement
+            # commits exactly when the entries and the stored result do.
+            webhooks_signals.record_event(batch, "created")
+
+        return Response(
+            batch.result,
+            status=status.HTTP_201_CREATED,
+            headers={"Location": reverse("api:batch-detail", args=[batch.pk])},
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        return Response(self.get_object().result)
+
+    def _get_existing(self, idempotency_key):
+        return (
+            api_models.Batch.objects.select_for_update()
+            .filter(user=self.request.user, idempotency_key=idempotency_key)
+            .first()
+        )
+
+    def _replay(self, batch, fingerprint):
+        """Answer a repeated submission with the result of the first one."""
+        if batch is None:
+            # The insert lost a race but the winning row is not readable yet.
+            return Response(
+                {
+                    "idempotency_key": [
+                        "This key is already being submitted; retry the request."
+                    ]
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        if batch.fingerprint != fingerprint:
+            return Response(
+                {
+                    "idempotency_key": [
+                        "This key was already used for a different batch."
+                    ]
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(batch.result, status=status.HTTP_201_CREATED)
+
+    def _save_entries(self, prepared):
+        context = self.get_serializer_context()
+        results = []
+        # The entries are not announced one by one, and a timer they consume
+        # is not announced as deleted: the batch event below is the only
+        # announcement this submission makes.
+        with webhooks_signals.suppress_events():
+            for index, kind, entry_serializer in prepared:
+                instance = entry_serializer.save()
+                data = type(entry_serializer)(instance, context=context).data
+                results.append({"kind": kind, **data})
+        return results
+
+    @staticmethod
+    def _response_body(batch, results):
+        return {
+            "id": batch.pk,
+            "idempotency_key": batch.idempotency_key,
+            "results": results,
+        }
+
+    @staticmethod
+    def _fingerprint(entries):
+        body = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 class ProfileView(views.APIView):

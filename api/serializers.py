@@ -264,6 +264,153 @@ class SleepSerializer(CoreModelWithDurationSerializer, TaggableSerializer):
         )
 
 
+class BatchEnvelopeSerializer(serializers.Serializer):
+    """
+    The shape of a batch request, checked before anything else.
+
+    Only the envelope is validated on a retry, so that resending a batch
+    whose timer was already consumed returns the stored result instead of
+    failing on the -- now gone -- timer. The entries themselves are checked
+    afterwards, by :class:`BatchSerializer`, and only when the key is new.
+    """
+
+    #: The largest batch accepted, so one request cannot hold an arbitrarily
+    #: long validation-and-write transaction open.
+    MAX_ENTRIES = 100
+
+    idempotency_key = serializers.CharField(
+        max_length=255,
+        help_text=(
+            "A key the client chooses. Sending the batch again with the same "
+            "key returns the result of the first submission."
+        ),
+    )
+    entries = serializers.ListField(
+        child=serializers.DictField(),
+        allow_empty=False,
+        help_text=(
+            'The entries to write. Each is an object with a "kind" of '
+            '"feeding" or "sleep" and the fields of that record.'
+        ),
+    )
+
+    def validate(self, attrs):
+        if len(attrs["entries"]) > self.MAX_ENTRIES:
+            raise ValidationError(
+                {
+                    "entries": [
+                        "A batch may contain at most {} entries.".format(
+                            self.MAX_ENTRIES
+                        )
+                    ]
+                }
+            )
+        return attrs
+
+
+class BatchSerializer(BatchEnvelopeSerializer):
+    """
+    Validate every entry of a batch before any of them is written.
+
+    Each entry names its record kind -- "feeding" or "sleep" -- in a "kind"
+    field rather than a "type" field, because a feeding already has a field
+    called "type". The entry is then checked with the serializer of that kind,
+    so the same field rules apply as to a single POST. Errors come back keyed
+    by the entry index, telling the caller which entries cannot be written,
+    and nothing is written while any entry fails.
+
+    Two checks run across entries rather than on each one: a timer cannot be
+    used by two entries, since the first consumes it, and two entries of the
+    same kind for the same child may not overlap in time. The per-entry
+    ``clean()`` methods only see the database, not entries still waiting in
+    the same batch, so overlaps between batch entries are checked here as
+    well, in input order.
+    """
+
+    #: Serializers an entry may consist of, keyed by its "kind" value.
+    ENTRY_SERIALIZERS = {
+        "feeding": FeedingSerializer,
+        "sleep": SleepSerializer,
+    }
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # Not a validate_<field> method on purpose: that name would make DRF
+        # treat it as the field-level validator for "entries".
+        attrs["prepared"] = self.check_entries(attrs["entries"])
+        return attrs
+
+    def check_entries(self, entries):
+        errors = {}
+        prepared = []
+        for index, entry in enumerate(entries):
+            kind = entry.get("kind")
+            if kind is None:
+                errors[str(index)] = {"kind": "This field is required."}
+                continue
+            entry_serializer_class = self.ENTRY_SERIALIZERS.get(kind)
+            if entry_serializer_class is None:
+                errors[str(index)] = {
+                    "kind": '"{}" is not a valid choice.'.format(kind)
+                }
+                continue
+            data = {key: value for key, value in entry.items() if key != "kind"}
+            entry_serializer = entry_serializer_class(data=data, context=self.context)
+            if not entry_serializer.is_valid():
+                errors[str(index)] = entry_serializer.errors
+            else:
+                prepared.append((index, kind, entry_serializer))
+
+        self._validate_timers(prepared, errors)
+        self._validate_periods(prepared, errors)
+
+        if errors:
+            raise ValidationError({"entries": errors})
+
+        return prepared
+
+    def _validate_timers(self, prepared, errors):
+        # The entry that uses a timer consumes (deletes) it, so a timer used
+        # by two entries would leave the second with nothing to consume. The
+        # later entry is the one reported.
+        timers_seen = {}
+        for index, kind, entry_serializer in prepared:
+            timer = getattr(entry_serializer, "timer", None)
+            if timer is None:
+                continue
+            if timer.pk in timers_seen:
+                errors.setdefault(str(index), {})[
+                    "timer"
+                ] = "This timer is already used by another entry in the batch."
+            else:
+                timers_seen[timer.pk] = index
+
+    def _validate_periods(self, prepared, errors):
+        # validate_unique_period only sees saved rows, so two periods that
+        # first meet inside this batch are compared here, kind by kind and
+        # child by child, in the order they were submitted.
+        periods = []
+        for index, kind, entry_serializer in prepared:
+            data = entry_serializer.validated_data
+            model = entry_serializer.Meta.model
+            child = data["child"]
+            start = data["start"]
+            end = data["end"]
+            for other in periods:
+                if (
+                    model is other[0]
+                    and child.pk == other[1]
+                    and start < other[3]
+                    and end > other[2]
+                ):
+                    errors.setdefault(str(index), {})["non_field_errors"] = [
+                        "Another entry in this batch intersects the specified "
+                        "time period."
+                    ]
+                    break
+            periods.append((model, child.pk, start, end))
+
+
 class TagSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = models.Tag
