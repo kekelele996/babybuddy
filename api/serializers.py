@@ -10,6 +10,7 @@ from django.contrib.auth.models import Group
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 
 from taggit.serializers import TagListSerializerField, TaggitSerializer
 
@@ -400,6 +401,11 @@ class WebhookEndpointSerializer(serializers.ModelSerializer):
     The secret can be written and is never read back. An application that
     chose its own sends it here; one that did not is given the generated
     secret once, in the response to the request that created the endpoint.
+
+    Sending a ``secret`` later is still an immediate replacement: the old key
+    is discarded at once and later requests carry the new signature only. An
+    overlap in which both keys keep working is an admin action with a cutoff,
+    not something a registering application arranges for itself.
     """
 
     # DRF leaves the model's URLValidator out of a URLField and puts its own
@@ -409,12 +415,31 @@ class WebhookEndpointSerializer(serializers.ModelSerializer):
         max_length=1000,
         validators=webhooks_models.WebhookEndpoint._meta.get_field("url").validators,
     )
+    # Not a model field anymore -- keys are versioned WebhookSecret rows -- so
+    # it is declared here as the write-once value the endpoint is made with.
+    secret = serializers.CharField(
+        required=False,
+        write_only=True,
+        min_length=webhooks_models.MIN_SECRET_LENGTH,
+        help_text=_(
+            "Given to the receiving application once, when the endpoint is "
+            "created. Sent later, it replaces the current key immediately."
+        ),
+    )
 
     class Meta:
         model = webhooks_models.WebhookEndpoint
         fields = ("id", "name", "url", "secret", "active", "created", "last_delivery")
         read_only_fields = ("created", "last_delivery")
-        extra_kwargs = {"secret": {"write_only": True, "min_length": 16}}
+
+    def update(self, instance, validated_data):
+        secret = validated_data.pop("secret", None)
+        endpoint = super().update(instance, validated_data)
+        if secret is not None:
+            # No cutoff: the old key stops signing straight away, which is
+            # the replacement semantics this endpoint has always had.
+            endpoint.rotate_secret(new_secret=secret)
+        return endpoint
 
 
 class CaregiverSerializer(serializers.ModelSerializer):

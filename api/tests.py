@@ -13,7 +13,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIRequestFactory, APITestCase
 
-from webhooks.models import WebhookEndpoint
+from webhooks import delivery
+from webhooks.models import WebhookEndpoint, WebhookSecret
 
 
 class TestBase:
@@ -1476,6 +1477,48 @@ class WebhookEndpointAPITestCase(APITestCase):
         endpoint.refresh_from_db()
         self.assertFalse(endpoint.active)
         self.assertEqual(endpoint.secret, new_secret)
+
+    def test_a_created_endpoint_holds_its_secret_as_version_1(self):
+        secret = "a-secret-the-receiver-issued-0123"
+        response = self.client.post(
+            self.endpoint,
+            {
+                "name": "Phone",
+                "url": "https://push.example.com/hook/abc",
+                "secret": secret,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        endpoint = WebhookEndpoint.objects.get(pk=response.data["id"])
+        key = endpoint.current_secret
+        self.assertEqual(key.version, 1)
+        self.assertEqual(key.secret, secret)
+
+    def test_patching_the_secret_retires_the_old_key_immediately(self):
+        # The API replacement keeps its old semantics: no overlap, the old
+        # signature cannot be checked after the PATCH.
+        endpoint = WebhookEndpoint.objects.create(
+            name="Phone",
+            url="https://push.example.com/hook/abc",
+            secret="the-old-secret-1234567890",
+        )
+        new_secret = "a-replacement-secret-0123456789"
+        response = self.client.patch(
+            "{}{}/".format(self.endpoint, endpoint.pk),
+            {"secret": new_secret},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        endpoint.refresh_from_db()
+        self.assertEqual(endpoint.secret, new_secret)
+        keys = list(WebhookSecret.objects.filter(endpoint=endpoint))
+        self.assertEqual([(key.version, key.secret) for key in keys], [(2, new_secret)])
+        header = delivery.signature_header(endpoint.valid_secrets(), 1000, "{}")
+        self.assertEqual(len(header.split(",")), 1)
+        self.assertNotIn(
+            delivery.signature("the-old-secret-1234567890", 1000, "{}"), header
+        )
 
     def test_delete(self):
         endpoint = WebhookEndpoint.objects.create(

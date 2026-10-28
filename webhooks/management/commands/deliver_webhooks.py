@@ -31,7 +31,9 @@ class Command(BaseCommand):
             metavar="SECONDS",
             help=(
                 "Keep running and deliver every SECONDS seconds instead of once. "
-                "Checking an empty queue is one small query, so a second is fine."
+                "An empty run is only a couple of small queries -- the due "
+                "events and the signing keys whose cutoff has passed -- so a "
+                "second is fine."
             ),
         )
 

@@ -39,17 +39,21 @@ Every request carries four headers:
 | `X-BabyBuddy-Event-Id`   | The same value as `id` in the body, for the sake of a receiver that has not parsed it yet |
 | `X-BabyBuddy-Event-Type` | The same value as `type` in the body                                                      |
 | `X-BabyBuddy-Timestamp`  | The request time, in whole seconds since the epoch                                        |
-| `X-BabyBuddy-Signature`  | `v1=` followed by an HMAC-SHA256 hex digest                                               |
+| `X-BabyBuddy-Signature`  | One or more `v1=` HMAC-SHA256 hex digests, comma-separated while a key is being rotated  |
 
 The signature covers the timestamp and the body, joined with a period. It does
 not cover the headers, so read `id` and `type` out of the body -- that copy is
 the one the signature vouches for.
 
+Normally the header holds one digest. While a signing key is being rotated it
+holds one digest per key that is still valid -- the current key's first, then
+the old key's -- so a request can be checked with either key. Split on the
+comma and accept a request if **any** digest matches:
+
 ```python
 import hashlib
 import hmac
 
-received = request.headers["X-BabyBuddy-Signature"].removeprefix("v1=")
 timestamp = request.headers["X-BabyBuddy-Timestamp"]
 body = request.body  # exactly as it arrived; re-encoding parsed JSON
                      # changes the bytes, and the digest with them
@@ -60,8 +64,12 @@ expected = hmac.new(
     hashlib.sha256,
 ).hexdigest()
 
-if not hmac.compare_digest(expected, received):  # not ==, so guessing does not
-    raise PermissionError("signature mismatch")  # get easier as it closes in
+received = request.headers["X-BabyBuddy-Signature"].split(",")
+if not any(
+    hmac.compare_digest(expected, part.removeprefix("v1="))  # not ==, so
+    for part in received                                      # guessing does
+):                                                            # not get easier
+    raise PermissionError("signature mismatch")               # as it closes in
 ```
 
 Three things make that check worth something, and two of them are on this side
@@ -98,8 +106,9 @@ install, which has no cron to add to, the command can keep running instead:
 python manage.py deliver_webhooks --every 1
 ```
 
-That checks the queue once a second from one process. Checking an empty queue
-is one small query, so a second costs next to nothing; starting the command
+That checks the queue once a second from one process. An empty second is only
+a couple of small queries — the events that are due and the signing keys whose
+cutoff has just passed — so it costs next to nothing; starting the command
 anew from a loop every second would start Django every second. In Docker it
 runs from a second container that shares the configuration and database with
 the app, with this as its command. A run that fails — the database briefly
@@ -122,9 +131,10 @@ ten seconds for each.
 ## Configuring an endpoint
 
 Endpoints are added under the webhooks section of `/admin/`. Each has a name, a
-URL and a secret; the secret is generated when the endpoint is created and can
-be replaced at any time. Deactivating an endpoint stops it being told anything, including events
-that were still queued when it went off; those wait until it is turned back on.
+URL and a signing key; the key is generated when the endpoint is created, and
+it can be [rotated](#rotating-the-signing-key) when it has to be replaced.
+Deactivating an endpoint stops it being told anything, including events that
+were still queued when it went off; those wait until it is turned back on.
 
 ### From another application
 
@@ -144,7 +154,55 @@ The secret is the one field that is never read back. Send `secret` along if the
 receiving application issued one — it has to be at least 16 characters — or
 leave it out and Baby Buddy generates it and returns it in the response to that
 request, the only time it appears. Replacing it later is a `PATCH` with a new
-`secret`; switching the endpoint off is a `PATCH` with `"active": false`.
+`secret`; that replacement is immediate for the current key, with no new
+overlap — the current signature stops being sent at once, so prefer
+[rotating](#rotating-the-signing-key) when the receiving side needs time to
+change over. Older keys already in an admin-arranged overlap keep signing
+until their own cutoffs. Switching the endpoint off is a `PATCH` with
+`"active": false`.
+
+## Rotating the signing key
+
+Keys are versioned: every endpoint always has one **current** key (the newest
+version) and, for a while after a rotation, one or more **retired** keys that
+each keep working until an agreed cutoff. Rotate a key when an endpoint changes
+hands or a secret may have leaked.
+
+In the webhooks section of `/admin/`, open the endpoint and use **Rotate
+signing key**:
+
+1. Pick the moment the **old key stops working at**. It is pre-filled a day out
+   as a suggestion; set it to whatever was agreed with whoever runs the
+   receiving application.
+2. Leave **New secret** blank to have one generated, or type one (at least 16
+   characters) if the receiving side issued it.
+3. Submit. The new secret is shown **once** on the next page — copy it to the
+   receiving application then. It is never shown again.
+
+What happens, in order:
+
+- The new key becomes current straight away and its version number is one
+  higher. Versions and the cutoff for each retired key are shown on the
+  endpoint's list row and edit page, so it is always visible which key is
+  current and when an old one stops.
+- Until the cutoff, **every request is signed with both keys**: the signature
+  header carries the current key's digest first and the old key's after it.
+  A receiver still holding the old key keeps verifying requests; one already
+  given the new key verifies with that. [Check all of them](#checking-that-a-request-came-from-baby-buddy),
+  not just the first digest.
+- At the cutoff the old key stops signing and its row is removed on the next
+  delivery run — within about a second with `--every 1`, otherwise at the next
+  scheduled run. From then on only the new signature is sent, so make sure the
+  receiving application has taken the new key _before_ the cutoff.
+- Nothing about a rotation lives outside the database — no process has to stay
+  running or be told. Restarting Baby Buddy or the delivery worker in the
+  middle changes nothing, and an expired key is still dropped on schedule.
+- Events already queued are not touched. A change waiting through its retries
+  is sent with whichever keys are valid when the attempt goes out.
+
+A rotation can itself be rotated: retiring a second key while the first is
+still in its overlap period is allowed, and each old key then stops at its own
+cutoff. Requests in the meantime carry a digest for every key still valid.
 
 ## What is announced
 

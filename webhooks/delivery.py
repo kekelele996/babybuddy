@@ -19,7 +19,7 @@ import urllib.parse
 
 from django.utils import timezone
 
-from webhooks.models import WebhookEvent, WebhookEndpoint
+from webhooks.models import WebhookEvent, WebhookEndpoint, WebhookSecret
 
 logger = logging.getLogger(__name__)
 
@@ -33,20 +33,40 @@ TIMEOUT = 10
 
 def signature(secret, timestamp, body):
     """
-    The value of the ``X-BabyBuddy-Signature`` header.
+    One signature, for one key: the digest put behind ``v1=``.
     The timestamp is covered along with the body, so the timestamp of a
     captured request cannot be moved to make an old body look fresh. It does
     not stop someone sending a captured request again exactly as it stands --
     the digest is the same and it verifies forever. Rejecting a stale timestamp
     and keeping the event ids already seen is what stops that, and it is the
     receiver that has to do both.
-    :param secret: the endpoint's signing secret
+    :param secret: the signing secret
     :param timestamp: the request time, in whole seconds since the epoch
     :param body: the request body, as sent
-    :return: the hex digest to put behind ``v1=``
+    :return: the hex digest
     """
     message = "{}.{}".format(timestamp, body).encode()
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+
+
+def signature_header(keys, timestamp, body):
+    """
+    The value of the ``X-BabyBuddy-Signature`` header.
+
+    While a key is being rotated the request carries one signature per key
+    that is still valid, joined with a comma: the current key's first, then
+    the retired keys'. A receiver tries each of them with the key it holds, so
+    whoever has not been given the new key yet can still check the request.
+    With one key -- everywhere outside a rotation -- the value is exactly
+    ``v1=<hex>`` as it always was.
+    :param keys: the WebhookSecret rows still valid at send time, current first
+    :param timestamp: the request time, in whole seconds since the epoch
+    :param body: the request body, as sent
+    :return: the header value
+    """
+    return ",".join(
+        "v1={}".format(signature(key.secret, timestamp, body)) for key in keys
+    )
 
 
 def body_for(event):
@@ -69,9 +89,15 @@ def body_for(event):
     )
 
 
-def post(endpoint, event, timeout=TIMEOUT):
+def post(endpoint, event, timeout=TIMEOUT, now=None):
     """
     Send one event to one endpoint.
+
+    The keys are read at send time, not at queue time: during a rotation the
+    request carries a signature for the current key and for every retired key
+    whose cutoff has not passed, and a request sent after a cutoff carries the
+    new key's signature only. Nothing about a rotation is held in memory, so a
+    worker restarted mid-rotation behaves exactly like one that kept running.
 
     Redirects are deliberately not followed: a signature would otherwise go out
     to whatever host the endpoint points at next. The signed message covers the
@@ -80,19 +106,19 @@ def post(endpoint, event, timeout=TIMEOUT):
     :param endpoint: a WebhookEndpoint instance
     :param event: a WebhookEvent instance
     :param timeout: seconds to wait for a response
+    :param now: the current time, defaulting to the real one
     :raises ValueError: when the response is not a success
     """
     body = body_for(event)
     timestamp = int(time.time())
+    keys = endpoint.valid_secrets(now=now)
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "BabyBuddy",
         "X-BabyBuddy-Event-Id": str(event.event_id),
         "X-BabyBuddy-Event-Type": event.type,
         "X-BabyBuddy-Timestamp": str(timestamp),
-        "X-BabyBuddy-Signature": "v1={}".format(
-            signature(endpoint.secret, timestamp, body)
-        ),
+        "X-BabyBuddy-Signature": signature_header(keys, timestamp, body),
     }
     parts = urllib.parse.urlsplit(endpoint.url)
     if parts.scheme == "https":
@@ -136,18 +162,24 @@ def deliver_pending(timeout=TIMEOUT, now=None):
     An event that goes out is removed, so the table holds only what still has
     to be sent or has been given up on and is not read through again.
 
+    The run first drops every signing key whose cutoff has passed. The rows
+    are what remember a rotation, so expiry needs no scheduler: a worker that
+    polls once a second enforces a cutoff within about a second, and one run
+    from cron enforces it the next time it runs, including after a restart.
+
     :param timeout: seconds to wait for a response
     :param now: the current time, defaulting to the real one
     :return: the number of events delivered
     """
     now = now or timezone.now()
+    WebhookSecret.purge_expired(now)
     delivered = 0
     for event in WebhookEvent.objects.filter(
         next_attempt__lte=now, endpoint__active=True
     ).select_related("endpoint"):
         endpoint = event.endpoint
         try:
-            post(endpoint, event, timeout=timeout)
+            post(endpoint, event, timeout=timeout, now=now)
         except Exception as error:
             event.attempts += 1
             event.last_error = str(error)[:255]
