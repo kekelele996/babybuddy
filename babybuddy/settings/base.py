@@ -79,6 +79,7 @@ MIDDLEWARE = [
     "babybuddy.middleware.AccessExpiry",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "axes.middleware.AxesMiddleware",
+    "babybuddy.middleware.MergedChildRedirect",
 ]
 
 

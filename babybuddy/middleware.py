@@ -1,5 +1,6 @@
 import copy
 import logging
+import re
 from os import getenv
 from time import time
 from functools import wraps
@@ -9,16 +10,19 @@ from urllib.parse import urlunsplit, urlsplit
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import logout
-from django.utils import timezone, translation
-from django.utils.translation import gettext_lazy as _
-from django.contrib.auth.middleware import RemoteUserMiddleware
 from django.http import (
     HttpRequest,
+    HttpResponsePermanentRedirect,
     HttpResponseRedirect,
     HttpResponse,
     StreamingHttpResponse,
 )
 from django.urls.base import set_script_prefix, get_script_prefix
+from django.utils import timezone, translation
+from django.utils.translation import gettext_lazy as _
+from django.contrib.auth.middleware import RemoteUserMiddleware
+
+from core.models import MergedChild
 
 from .models import access_expired
 
@@ -259,3 +263,44 @@ class AccessExpiry:
             logout(request)
             messages.error(request, _("Your access has expired."))
         return None
+
+
+class MergedChildRedirect:
+    """
+    Keeps old child links alive after a profile merge. When a child-scoped
+    URL 404s because the child's slug now belongs to a `MergedChild` alias,
+    permanently redirect (301) to the same page on the surviving child.
+    """
+
+    path_re = re.compile(r"^/(?P<api>api/)?children/(?P<slug>[^/]+)(?P<rest>/.*)?$")
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if response.status_code != 404 or request.method not in ("GET", "HEAD"):
+            return response
+        match = self.path_re.match(request.path)
+        if not match:
+            return response
+        alias = (
+            MergedChild.objects.select_related("child")
+            .filter(slug=match.group("slug"))
+            .first()
+        )
+        if alias is None:
+            return response
+        # Web pages carry Django model permissions; the API authenticates and
+        # authorizes again at the redirected endpoint itself.
+        if not match.group("api") and not (
+            request.user.is_authenticated and request.user.has_perm("core.view_child")
+        ):
+            return response
+        prefix = "/api/" if match.group("api") else "/"
+        rest = match.group("rest") or "/"
+        url = "{}children/{}{}".format(prefix, alias.child.slug, rest)
+        query_string = request.META.get("QUERY_STRING")
+        if query_string:
+            url = "?".join((url, query_string))
+        return HttpResponsePermanentRedirect(url)

@@ -303,6 +303,17 @@ class TaggedItemInline(admin.StackedInline):
     model = models.Tagged
 
 
+@admin.register(models.MergedChild)
+class MergedChildAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "child", "merged_at")
+    list_select_related = ("child",)
+    search_fields = ("name", "slug", "child__first_name", "child__last_name")
+    readonly_fields = ("slug", "name", "child", "merged_at")
+
+    def has_add_permission(self, request):
+        return False
+
+
 class TagImportExportResource(resources.ModelResource):
     id = fields.Field(attribute="id")
 

@@ -338,6 +338,31 @@ class ChildDeleteForm(forms.ModelForm):
         return instance
 
 
+class ChildMergeForm(forms.Form):
+    target = forms.ModelChoiceField(
+        label=_("Merge into child"),
+        queryset=models.Child.objects.all(),
+    )
+    confirm_name = forms.CharField(
+        label=_("To confirm this action. Type the full name of the child below."),
+        max_length=511,
+    )
+
+    def __init__(self, *args, source, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.source = source
+        # A child cannot be merged into itself.
+        self.fields["target"].queryset = models.Child.objects.exclude(pk=source.pk)
+
+    def clean_confirm_name(self):
+        confirm_name = self.cleaned_data["confirm_name"]
+        if confirm_name != str(self.source):
+            raise forms.ValidationError(
+                _("Name does not match child name."), code="confirm_mismatch"
+            )
+        return confirm_name
+
+
 class DiaperChangeForm(CoreModelForm, TaggableModelForm):
     fieldsets = [
         {"fields": ["child", "time"], "layout": "required"},

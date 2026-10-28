@@ -58,6 +58,11 @@
                                     </a>
                                 {% endif %}
                                 {% if perms.core.delete_child %}
+                                    <a href="{% url 'core:child-merge' child.slug %}"
+                                       class="btn btn-info"
+                                       title="{% trans 'Merge into another child' %}">
+                                        <i class="icon-angle-double-right" aria-hidden="true"></i>
+                                    </a>
                                     <a href="{% url 'core:child-delete' child.slug %}"
                                        class="btn btn-danger">
                                         <i class="icon-delete" aria-hidden="true"></i>

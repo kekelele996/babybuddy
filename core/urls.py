@@ -25,6 +25,11 @@ urlpatterns = [
     path(
         "children/<str:slug>/delete/", views.ChildDelete.as_view(), name="child-delete"
     ),
+    path(
+        "children/<str:slug>/merge/",
+        views.ChildMergeView.as_view(),
+        name="child-merge",
+    ),
     path("timeline/", views.Timeline.as_view(), name="timeline"),
     path("changes/", views.DiaperChangeList.as_view(), name="diaperchange-list"),
     path("changes/add/", views.DiaperChangeAdd.as_view(), name="diaperchange-add"),

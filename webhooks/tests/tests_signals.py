@@ -72,6 +72,8 @@ class WebhookSignalTestCase(TestCase):
             models.Tagged,
             models.HeightPercentile,
             models.WeightPercentile,
+            # Internal redirect record left behind by a profile merge.
+            models.MergedChild,
         }
         for candidate in apps.get_app_config("core").get_models():
             if not issubclass(candidate, Model):

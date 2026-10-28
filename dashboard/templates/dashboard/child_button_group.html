@@ -27,6 +27,10 @@
     {% endif %}
     {% if perms.core.delete_child %}
         <a class="btn d-none d-md-inline-block"
+           href="{% url 'core:child-merge' object.slug %}"
+           title="{% trans 'Merge into another child' %}"
+           role="button"><i class="icon-angle-double-right" aria-hidden="true"></i></a>
+        <a class="btn d-none d-md-inline-block"
            href="{% url 'core:child-delete' object.slug %}"
            title="{% trans "Delete" %}"
            role="button"><i class="icon-delete" aria-hidden="true"></i></a>

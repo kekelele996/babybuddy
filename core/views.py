@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
+import logging
+
 from django.contrib import messages
 from django.contrib.messages.views import SuccessMessageMixin
 from django.db.models import Count
 from django.db.models.functions import Lower
 from django.forms import Form, ValidationError
 from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.translation import gettext as _
@@ -14,7 +17,9 @@ from django.views.generic.edit import CreateView, UpdateView, DeleteView, FormVi
 
 from babybuddy.mixins import LoginRequiredMixin, PermissionRequiredMixin
 from babybuddy.views import BabyBuddyFilterView, BabyBuddyPaginatedView
-from core import filters, forms, models, timeline
+from core import filters, forms, merge, models, timeline
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_timeline_context_data(context, date, child=None, user=None):
@@ -166,6 +171,83 @@ class ChildDelete(CoreUpdateView):
             "model": self.model._meta.verbose_name.title()
         }
         return success_message % cleaned_data
+
+
+class ChildMergeView(PermissionRequiredMixin, FormView):
+    form_class = forms.ChildMergeForm
+    template_name = "core/child_merge.html"
+    permission_required = ("core.delete_child",)
+
+    def dispatch(self, request, *args, **kwargs):
+        self.object = get_object_or_404(models.Child, slug=kwargs["slug"])
+        # A merge needs another profile to move everything into.
+        if not models.Child.objects.exclude(pk=self.object.pk).exists():
+            messages.warning(
+                request,
+                _("At least two children are required to merge profiles."),
+            )
+            return HttpResponseRedirect(reverse("core:child-list"))
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["source"] = self.object
+        target = self.get_selected_target()
+        if target:
+            kwargs["initial"] = {"target": target.pk}
+        return kwargs
+
+    def get_selected_target(self):
+        """The target child whose conflicts should currently be previewed."""
+        target_id = None
+        if self.request.method == "POST":
+            target_id = self.request.POST.get("target")
+        else:
+            target_id = self.request.GET.get("target")
+        if target_id:
+            target = (
+                models.Child.objects.exclude(pk=self.object.pk)
+                .filter(pk=target_id)
+                .first()
+            )
+            if target:
+                return target
+        return models.Child.objects.exclude(pk=self.object.pk).first()
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["object"] = self.object
+        context["other_children"] = models.Child.objects.exclude(pk=self.object.pk)
+        context["target"] = self.get_selected_target()
+        context["preview"] = merge.build_merge_preview(self.object, context["target"])
+        return context
+
+    def form_valid(self, form):
+        target = form.cleaned_data["target"]
+        try:
+            merge.merge_children(self.object, target)
+        except Exception:
+            # The transaction rolls back, so both profiles stay untouched.
+            logger.exception(
+                "Failed to merge child %s into %s.", self.object.pk, target.pk
+            )
+            messages.error(
+                self.request,
+                _(
+                    "The merge could not be completed. No changes were made "
+                    "and both profiles were kept."
+                ),
+            )
+            return self.render_to_response(self.get_context_data(form=form))
+        messages.success(
+            self.request,
+            _(
+                "%(source)s was merged into %(target)s. Links to the old "
+                "profile now open %(target)s."
+            )
+            % {"source": form.source, "target": target},
+        )
+        return HttpResponseRedirect(reverse("core:child", args=[target.slug]))
 
 
 class DiaperChangeList(

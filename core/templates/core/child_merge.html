@@ -1,0 +1,162 @@
+{% extends "babybuddy/page.html" %}
+{% load i18n widget_tweaks %}
+{% block title %}
+    {% trans "Merge Children" %}
+{% endblock %}
+{% block breadcrumbs %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'core:child-list' %}">{% trans "Children" %}</a>
+    </li>
+    <li class="breadcrumb-item fw-bold">
+        <a href="{% url 'core:child' object.slug %}">{{ object }}</a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">{% trans "Merge" %}</li>
+{% endblock %}
+{% block content %}
+    <h1>{% trans "Merge Children" %}</h1>
+    <p class="lead">
+        {% blocktrans with source=object target=target %}
+            Move all entries of {{ source }} into the profile of {{ target }}.
+            The source profile is deleted afterwards; old links to it open the
+            surviving profile automatically.
+        {% endblocktrans %}
+    </p>
+    <form method="get" class="row g-2 align-items-end mb-3">
+        <div class="col-auto">
+            <label class="form-label fw-bold" for="merge-target-select">{% trans "Surviving child" %}</label>
+            <select name="target" id="merge-target-select" class="form-select">
+                {% for child in other_children %}
+                    <option value="{{ child.pk }}"
+                            {% if child.pk == target.pk %}selected{% endif %}>{{ child }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-auto">
+            <button type="submit" class="btn btn-default">{% trans "Preview for this child" %}</button>
+        </div>
+    </form>
+    <div class="row mb-2">
+        <div class="col-md-5">
+            <div class="card border-danger">
+                <div class="card-header bg-danger text-white">{% trans "Moved away (deleted profile)" %}</div>
+                <div class="card-body fw-bold">{{ object }}</div>
+            </div>
+        </div>
+        <div class="col-md-2 text-center align-self-center">
+            <i class="icon-angle-double-right fs-1"></i>
+        </div>
+        <div class="col-md-5">
+            <div class="card border-success">
+                <div class="card-header bg-success text-white">{% trans "Surviving profile" %}</div>
+                <div class="card-body fw-bold">{{ target }}</div>
+            </div>
+        </div>
+    </div>
+    <h2 class="h5">{% trans "Entries that will be moved" %}</h2>
+    <div class="table-responsive">
+        <table class="table table-sm align-middle">
+            <thead>
+                <tr>
+                    <th>{% trans "Type" %}</th>
+                    <th class="text-end">{% trans "Entries" %}</th>
+                    <th>{% trans "Colliding entries of the same type" %}</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for section in preview.sections %}
+                    <tr {% if section.conflicts %}class="table-warning"{% endif %}>
+                        <td>{{ section.verbose_name }}</td>
+                        <td class="text-end">{{ section.count }}</td>
+                        <td>
+                            {% for conflict in section.conflicts %}
+                                <div>
+                                    <a href="{{ conflict.source_url }}">{{ conflict.source_label }}</a>
+                                    <i class="icon-cancel text-danger" aria-hidden="true"></i>
+                                    <a href="{{ conflict.target_url }}">{{ conflict.target_label }}</a>
+                                </div>
+                            {% empty %}
+                                <span class="text-muted">{% trans "None" %}</span>
+                            {% endfor %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+            <tfoot>
+                <tr class="fw-bold">
+                    <td>{% trans "Total" %}</td>
+                    <td class="text-end">{{ preview.entry_total }}</td>
+                    <td>{{ preview.conflict_total }}</td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+    {% if preview.conflict_total %}
+        <div class="alert alert-warning">
+            <i class="icon-cancel" aria-hidden="true"></i>
+            {% blocktrans count counter=preview.conflict_total trimmed %}
+                One entry overlaps or shares the same date/time as an entry on
+                the surviving child. It is still moved; review and adjust the
+                entries afterwards if needed.
+            {% plural %}
+                {{ counter }} entries overlap or share the same date/time as
+                entries on the surviving child. They are still moved; review
+                and adjust the entries afterwards if needed.
+            {% endblocktrans %}
+        </div>
+    {% endif %}
+    <h2 class="h5">{% trans "Also handled" %}</h2>
+    <ul>
+        <li>
+            <i class="icon-timer" aria-hidden="true"></i>
+            {% blocktrans count counter=preview.timer_total trimmed %}
+                One timer ({{ preview.timer_active_total }} still running) is
+                reassigned to the surviving child.
+            {% plural %}
+                {{ counter }} timers ({{ preview.timer_active_total }} still
+                running) are reassigned to the surviving child.
+            {% endblocktrans %}
+        </li>
+        <li>
+            <i class="icon-tag" aria-hidden="true"></i>
+            {% trans "Tags stay on their entries and move along with them." %}
+        </li>
+        <li>
+            <i class="icon-camera" aria-hidden="true"></i>
+            {% if preview.picture_will_copy %}
+                {% trans "The surviving child has no picture, so the profile picture of the moved child is used. Photos inside notes move with the notes." %}
+            {% else %}
+                {% trans "Photos inside notes move with the notes. The surviving child already has a profile picture, so the other picture is not copied." %}
+            {% endif %}
+        </li>
+        <li>
+            <i class="icon-refresh" aria-hidden="true"></i>
+            {% trans "The whole merge runs in one step: if anything fails, both profiles remain unchanged." %}
+        </li>
+        <li>
+            <i class="icon-angle-double-right" aria-hidden="true"></i>
+            {% trans "Old direct links and bookmarks to the deleted profile redirect to the surviving child." %}
+        </li>
+    </ul>
+    <form role="form" method="post" class="mt-4">
+        {% csrf_token %}
+        {{ form.target.as_hidden }}
+        {% if form.non_field_errors or form.target.errors %}
+            <div class="alert alert-danger">
+                {{ form.non_field_errors }}
+                {{ form.target.errors }}
+            </div>
+        {% endif %}
+        <div class="form-group mb-3">
+            <label class="form-label" for="{{ form.confirm_name.id_for_label }}">{{ form.confirm_name.label }}</label>
+            {% if form.confirm_name.errors %}
+                {{ form.confirm_name|add_class:"form-control is-invalid" }}
+                <div class="invalid-feedback">{{ form.confirm_name.errors.0 }}</div>
+            {% else %}
+                {{ form.confirm_name|add_class:"form-control" }}
+            {% endif %}
+        </div>
+        <button type="submit" class="btn btn-danger btn-lg">{% trans "Merge and delete source profile" %}</button>
+        <a href="{% url 'core:child' object.slug %}"
+           class="btn btn-default btn-lg">{% trans "Cancel" %}</a>
+    </form>
+{% endblock %}

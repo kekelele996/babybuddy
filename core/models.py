@@ -887,6 +887,44 @@ class Medication(models.Model):
         return str(_("Medication"))
 
 
+class MergedChild(models.Model):
+    """
+    A redirect record left behind when one Child profile is merged into
+    another. The former child's slug keeps resolving (301) to the surviving
+    child so old direct links still open the merged profile.
+    """
+
+    model_name = "merged child"
+    slug = models.SlugField(
+        allow_unicode=True,
+        editable=False,
+        max_length=100,
+        unique=True,
+        verbose_name=_("Former slug"),
+    )
+    name = models.CharField(
+        editable=False, max_length=511, verbose_name=_("Former name")
+    )
+    child = models.ForeignKey(
+        "Child",
+        on_delete=models.CASCADE,
+        related_name="merged_aliases",
+        verbose_name=_("Surviving child"),
+    )
+    merged_at = models.DateTimeField(auto_now_add=True, verbose_name=_("Merged at"))
+
+    objects = models.Manager()
+
+    class Meta:
+        default_permissions = ("view",)
+        ordering = ["-merged_at"]
+        verbose_name = _("Merged child")
+        verbose_name_plural = _("Merged children")
+
+    def __str__(self):
+        return "{} -> {}".format(self.name, self.child)
+
+
 class WeightPercentile(models.Model):
     model_name = "weight percentile"
     age_in_days = models.DurationField(null=False)
