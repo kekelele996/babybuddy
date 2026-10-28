@@ -2,8 +2,36 @@
 {# Load any form-javascript files #}
 {{ form.media.js }}
 <div class="container-fluid pb-5">
-    <form role="form" method="post" enctype="multipart/form-data">
+    <form role="form"
+          method="post"
+          enctype="multipart/form-data"
+          {% if draft %}data-draft-key="{{ draft.key }}" data-draft-url="{{ draft.url }}" data-draft-child="{{ draft.child }}" data-draft-bound="{{ draft.bound|yesno:"true,false" }}"{% endif %}>
         {% csrf_token %}
+        {% if draft %}
+            {% trans "Recovered your unsaved entry from" as draft_restored %}
+            {% trans "just now" as draft_just_now %}
+            {% trans "minutes ago" as draft_minutes_ago %}
+            {% trans "hours ago" as draft_hours_ago %}
+            {% trans "days ago" as draft_days_ago %}
+            {% trans "Discard draft" as draft_discard %}
+            {% trans "This child has an unsaved draft. Load it?" as draft_switch_confirm %}
+            <div class="alert alert-info d-none mb-3" role="status" data-draft-banner>
+                <span data-draft-message></span>
+                <button type="button"
+                        class="btn btn-sm btn-outline-light ms-2"
+                        data-draft-discard>{{ draft_discard }}</button>
+            </div>
+            <script type="application/json" data-draft-i18n>
+{
+  "restored": "{{ draft_restored|escapejs }}",
+  "just_now": "{{ draft_just_now|escapejs }}",
+  "minutes_ago": "{{ draft_minutes_ago|escapejs }}",
+  "hours_ago": "{{ draft_hours_ago|escapejs }}",
+  "days_ago": "{{ draft_days_ago|escapejs }}",
+  "switch_confirm": "{{ draft_switch_confirm|escapejs }}"
+}
+            </script>
+        {% endif %}
         {% if form.fieldsets %}
             {% for fieldset in form.hydrated_fielsets %}
                 {% with "forms/layouts/"|add:fieldset.layout|add:".html" as template %}

@@ -99,6 +99,13 @@ def validate_time(time, field_name):
         )
 
 
+#: How long an untouched entry-form draft stays recoverable. Drafts only hold
+#: widget values for a not-yet-submitted add form, so a week-old draft is more
+#: likely to mislead (stale times) than help. Read paths treat older drafts as
+#: absent and delete them lazily; ``clear_expired_drafts`` purges the rest.
+FORM_DRAFT_TTL = datetime.timedelta(days=7)
+
+
 class Tag(TagBase):
     model_name = "tag"
     DARK_COLOR = "#101010"
@@ -913,3 +920,114 @@ class WeightPercentile(models.Model):
 
     def __str__(self):
         return f"Sex: {self.sex}, Age: {self.age_in_days} days, p3: {self.p3_weight} kg, p15: {self.p15_weight} kg, p50: {self.p50_weight} kg, p85: {self.p85_weight} kg, p97: {self.p97_weight} kg"
+
+
+def _draft_slot_lookup(child_id):
+    """Build the child part of a draft-slot lookup.
+
+    A missing/empty child id matches the NULL slot (form opened before a child
+    was chosen); everything else matches the concrete child.
+    """
+    if child_id in (None, ""):
+        return {"child__isnull": True}
+    return {"child_id": child_id}
+
+
+class FormDraftManager(models.Manager):
+    def cutoff(self):
+        return timezone.now() - FORM_DRAFT_TTL
+
+    def valid(self):
+        """Drafts still inside their lifetime."""
+        return self.filter(updated__gte=self.cutoff())
+
+    def get_valid(self, user, form_key, child_id):
+        """
+        Return the user's live draft for the slot, or None. An expired draft
+        in the same slot is treated as absent and removed on the way out.
+        """
+        lookup = {"user": user, "form_key": form_key, **_draft_slot_lookup(child_id)}
+        draft = self.valid().filter(**lookup).first()
+        if draft is None:
+            self.filter(**lookup, updated__lt=self.cutoff()).delete()
+        return draft
+
+    def upsert(self, user, form_key, child_id, data):
+        """Create or replace the single draft held per slot (last write wins)."""
+        draft, _ = self.update_or_create(
+            user=user,
+            form_key=form_key,
+            defaults={"data": data},
+            **_draft_slot_lookup(child_id),
+        )
+        return draft
+
+    def discard(self, user, form_key, child_id):
+        """Delete the slot's draft; return how many rows were removed."""
+        return self.filter(
+            user=user, form_key=form_key, **_draft_slot_lookup(child_id)
+        ).delete()[0]
+
+    def clear_expired(self):
+        """Delete every expired draft. Used by the clear_expired_drafts command."""
+        return self.filter(updated__lt=self.cutoff()).delete()[0]
+
+
+class FormDraft(models.Model):
+    """
+    A not-yet-submitted add form, saved while it is being filled in.
+
+    Drafts are plain widget values keyed by (user, form, child); they are never
+    turned into care-entry instances, carry no signals and therefore produce no
+    webhook events. They exist so an interrupted entry can be resumed on this
+    device or another one, and they vanish once the real entry is saved or once
+    FORM_DRAFT_TTL elapses.
+    """
+
+    user = models.ForeignKey(
+        "auth.User",
+        on_delete=models.CASCADE,
+        related_name="form_drafts",
+        verbose_name=_("User"),
+    )
+    child = models.ForeignKey(
+        Child,
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="form_drafts",
+        verbose_name=_("Child"),
+    )
+    form_key = models.CharField(max_length=64, verbose_name=_("Form"))
+    data = models.JSONField(default=dict, verbose_name=_("Form data"))
+    created = models.DateTimeField(auto_now_add=True, verbose_name=_("Created"))
+    updated = models.DateTimeField(
+        auto_now=True, db_index=True, verbose_name=_("Updated")
+    )
+
+    objects = FormDraftManager()
+
+    class Meta:
+        constraints = [
+            # One slot per (user, form), split by whether a child was chosen.
+            # Partial indexes give the NULL slot real uniqueness on both
+            # SQLite and PostgreSQL, where a plain NULL in a unique index
+            # would not.
+            models.UniqueConstraint(
+                fields=["user", "form_key"],
+                condition=models.Q(child__isnull=True),
+                name="uniq_formdraft_null_child",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "form_key", "child"],
+                condition=models.Q(child__isnull=False),
+                name="uniq_formdraft_with_child",
+            ),
+        ]
+        ordering = ["-updated"]
+        verbose_name = _("Form draft")
+        verbose_name_plural = _("Form drafts")
+
+    def __str__(self):
+        target = self.child if self.child_id else _("no child")
+        return "{} ({})".format(self.form_key, target)

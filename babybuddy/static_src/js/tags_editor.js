@@ -293,6 +293,70 @@
 
       this.updateInputList();
       this.taggingBase.addTagListUpdatedListener(() => this.updateInputList());
+
+      // Drafts restore through the hidden input and this event. Also reconcile
+      // once at startup, because a draft value may have been set before this
+      // editor was constructed.
+      this.inputElement.addEventListener(
+        "babybuddy:draft-tags-restore",
+        (event) => {
+          this.restoreFromDraft((event.detail && event.detail.names) || []);
+        },
+      );
+      this.restoreFromDraft(this.parseInputNames());
+    }
+
+    /**
+     * Read the quoted tag names out of the hidden input value.
+     */
+    parseInputNames() {
+      const names = [];
+      const pattern = /"((?:[^"\\]|\\.)*)"/g;
+      let match;
+      while ((match = pattern.exec(this.inputElement.value || ""))) {
+        names.push(match[1]);
+      }
+      return names;
+    }
+
+    /**
+     * Find a tag node by its name without building a CSS selector from it.
+     */
+    findTag(container, name) {
+      const tags = container.querySelectorAll("span.tag");
+      for (const tag of tags) {
+        if (tag.getAttribute("data-value") === name) {
+          return tag;
+        }
+      }
+      return null;
+    }
+
+    /**
+     * Rebuild the "current tags" list for a restored draft, reusing existing
+     * tag nodes (and their click handlers) wherever possible.
+     */
+    restoreFromDraft(names) {
+      const wanted = new Set(names);
+      this.currentTags.querySelectorAll("span.tag").forEach((tag) => {
+        if (!wanted.has(tag.getAttribute("data-value"))) {
+          tag.click();
+        }
+      });
+      names.forEach((name) => {
+        if (this.findTag(this.currentTags, name)) {
+          return;
+        }
+        const suggestion = this.findTag(this.newTags, name);
+        if (suggestion) {
+          suggestion.click();
+          return;
+        }
+        // Tag created elsewhere or not in the suggestion list.
+        const tag = this.taggingBase.createNewTag(name, "#6c757d", "-");
+        this.insertNewTag(tag);
+      });
+      this.updateInputList();
     }
 
     /**

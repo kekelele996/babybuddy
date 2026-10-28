@@ -72,6 +72,9 @@ class WebhookSignalTestCase(TestCase):
             models.Tagged,
             models.HeightPercentile,
             models.WeightPercentile,
+            # UI-only state for an unsubmitted add form; it is not a care
+            # record and must never be announced as a new record.
+            models.FormDraft,
         }
         for candidate in apps.get_app_config("core").get_models():
             if not issubclass(candidate, Model):

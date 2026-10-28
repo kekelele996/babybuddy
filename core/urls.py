@@ -2,10 +2,12 @@
 from django.urls import path
 
 from . import views
+from .drafts import DraftEndpoint
 
 app_name = "core"
 
 urlpatterns = [
+    path("drafts/", DraftEndpoint.as_view(), name="draft-endpoint"),
     path("pumping/", views.PumpingList.as_view(), name="pumping-list"),
     path("pumping/add/", views.PumpingAdd.as_view(), name="pumping-add"),
     path(

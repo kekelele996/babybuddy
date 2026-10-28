@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+import logging
+
+from django import forms as django_forms
 from django.contrib import messages
 from django.contrib.messages.views import SuccessMessageMixin
 from django.db.models import Count
@@ -14,7 +17,9 @@ from django.views.generic.edit import CreateView, UpdateView, DeleteView, FormVi
 
 from babybuddy.mixins import LoginRequiredMixin, PermissionRequiredMixin
 from babybuddy.views import BabyBuddyFilterView, BabyBuddyPaginatedView
-from core import filters, forms, models, timeline
+from core import drafts, filters, forms, models, timeline
+
+logger = logging.getLogger(__name__)
 
 
 def _prepare_timeline_context_data(context, date, child=None, user=None):
@@ -46,6 +51,10 @@ class CoreFormMixin:
 class CoreAddView(
     CoreFormMixin, PermissionRequiredMixin, SuccessMessageMixin, CreateView
 ):
+    #: Key of the recoverable-draft slot for this form, or None to opt out.
+    #: Must be registered in the drafts module's DRAFT_FORMS mapping.
+    draft_key = None
+
     def get_success_message(self, cleaned_data):
         cleaned_data["model"] = self.model._meta.verbose_name.title()
         if "child" in cleaned_data:
@@ -71,6 +80,74 @@ class CoreAddView(
                 if parameter in self.request.GET:
                     kwargs[parameter] = self.request.GET[parameter]
         return kwargs
+
+    # -- Recoverable drafts -------------------------------------------------
+    # Drafts live in their own table and are only read/written by the browser
+    # through the draft endpoint. The add view itself only clears the slot on a
+    # successful submit and mirrors a rejected submit into it, so a failed
+    # submit is resumable too and can never touch a saved record.
+
+    def draft_child_id(self):
+        """The child the in-progress form currently belongs to, or ""."""
+        if self.request.method == "POST":
+            raw = self.request.POST.get("child", "")
+            return int(raw) if str(raw).isdigit() else ""
+        slug = self.request.GET.get("child")
+        if slug:
+            child = models.Child.objects.filter(slug=slug).first()
+            if child:
+                return child.pk
+        if models.Child.count() == 1:
+            return models.Child.objects.first().pk
+        return ""
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        if self.draft_key:
+            context["draft"] = {
+                "key": self.draft_key,
+                "url": reverse("core:draft-endpoint"),
+                "child": self.draft_child_id(),
+                "bound": self.request.method == "POST",
+            }
+        return context
+
+    def failed_submission_data(self, form):
+        """Extract widget values of a rejected submit, keyed by field name."""
+        data = {}
+        for name in drafts.draft_field_names(form.__class__):
+            if name in self.request.POST:
+                data[name] = self.request.POST.get(name)
+            elif isinstance(form.fields.get(name), django_forms.BooleanField):
+                data[name] = False
+        return data
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        # CoreFormMixin turns a save-time ValidationError into a re-rendered
+        # (200) invalid form; only a real redirect means the entry exists and
+        # its draft may go. Clearing on 200 would also wipe the draft that
+        # form_invalid just wrote for the rejected submit.
+        if self.draft_key and isinstance(response, HttpResponseRedirect):
+            child = form.cleaned_data.get("child")
+            models.FormDraft.objects.discard(
+                self.request.user, self.draft_key, child.pk if child else None
+            )
+        return response
+
+    def form_invalid(self, form):
+        if self.draft_key:
+            try:
+                data = self.failed_submission_data(form)
+                if not drafts.is_empty_data(data):
+                    child_id = self.draft_child_id() or None
+                    models.FormDraft.objects.upsert(
+                        self.request.user, self.draft_key, child_id, data
+                    )
+            except Exception:
+                # Drafting must never mask or block the form error response.
+                logger.exception("Could not retain draft for %s.", self.draft_key)
+        return super().form_invalid(form)
 
 
 class CoreUpdateView(
@@ -209,6 +286,7 @@ class FeedingAdd(CoreAddView):
     permission_required = ("core.add_feeding",)
     form_class = forms.FeedingForm
     success_url = reverse_lazy("core:feeding-list")
+    draft_key = "feeding"
 
 
 class BottleFeedingAdd(CoreAddView):
@@ -216,6 +294,7 @@ class BottleFeedingAdd(CoreAddView):
     permission_required = ("core.add_feeding",)
     form_class = forms.BottleFeedingForm
     success_url = reverse_lazy("core:feeding-list")
+    draft_key = "bottle-feeding"
 
 
 class FeedingUpdate(CoreUpdateView):
@@ -359,6 +438,7 @@ class PumpingAdd(CoreAddView):
     form_class = forms.PumpingForm
     success_url = reverse_lazy("core:pumping-list")
     success_message = _("%(model)s entry added!")
+    draft_key = "pumping"
 
 
 class PumpingUpdate(CoreUpdateView):
@@ -387,6 +467,7 @@ class SleepAdd(CoreAddView):
     permission_required = ("core.add_sleep",)
     form_class = forms.SleepForm
     success_url = reverse_lazy("core:sleep-list")
+    draft_key = "sleep"
 
 
 class SleepUpdate(CoreUpdateView):
@@ -611,6 +692,7 @@ class TummyTimeAdd(CoreAddView):
     permission_required = ("core.add_tummytime",)
     form_class = forms.TummyTimeForm
     success_url = reverse_lazy("core:tummytime-list")
+    draft_key = "tummytime"
 
 
 class TummyTimeUpdate(CoreUpdateView):
