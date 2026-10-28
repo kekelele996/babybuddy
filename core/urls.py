@@ -25,6 +25,16 @@ urlpatterns = [
     path(
         "children/<str:slug>/delete/", views.ChildDelete.as_view(), name="child-delete"
     ),
+    path(
+        "children/<str:slug>/archive/",
+        views.ChildArchive.as_view(),
+        name="child-archive",
+    ),
+    path(
+        "children/<str:slug>/restore/",
+        views.ChildRestore.as_view(),
+        name="child-restore",
+    ),
     path("timeline/", views.Timeline.as_view(), name="timeline"),
     path("changes/", views.DiaperChangeList.as_view(), name="diaperchange-list"),
     path("changes/add/", views.DiaperChangeAdd.as_view(), name="diaperchange-add"),

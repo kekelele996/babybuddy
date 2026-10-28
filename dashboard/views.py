@@ -12,22 +12,26 @@ class Dashboard(LoginRequiredMixin, TemplateView):
     # TODO: Use .card-deck in this template once BS4 is finalized.
     template_name = "dashboard/dashboard.html"
 
-    # Show the overall dashboard or a child dashboard if one Child instance.
+    # Show the overall dashboard or a child dashboard if one active Child.
     def get(self, request, *args, **kwargs):
-        children = Child.objects.count()
-        if children == 0:
+        if Child.objects.count() == 0:
             return HttpResponseRedirect(reverse("babybuddy:welcome"))
-        elif children == 1:
+        active_children = Child.active.count()
+        if active_children == 1:
             return HttpResponseRedirect(
-                reverse("dashboard:dashboard-child", args={Child.objects.first().slug})
+                reverse(
+                    "dashboard:dashboard-child",
+                    args={Child.active.first().slug},
+                )
             )
         return super(Dashboard, self).get(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         context = super(Dashboard, self).get_context_data(**kwargs)
-        context["objects"] = Child.objects.all().order_by(
+        context["objects"] = Child.active.all().order_by(
             "last_name", "first_name", "id"
         )
+        context["archived_count"] = Child.objects.filter(archived=True).count()
         return context
 
 

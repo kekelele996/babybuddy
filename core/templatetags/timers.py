@@ -16,7 +16,7 @@ def timer_nav(context):
     """
     request = context["request"] or None
     timers = Timer.objects.filter()
-    children = Child.objects.all()
+    children = Child.active.all()
     perms = context["perms"] or None
     # The 'next' parameter is currently not used.
     return {
@@ -29,7 +29,7 @@ def timer_nav(context):
 
 @register.inclusion_tag("core/quick_timer_nav.html", takes_context=True)
 def quick_timer_nav(context):
-    children = Child.objects.all()
+    children = Child.active.all()
     perms = context["perms"] or None
     return {"children": children, "perms": perms}
 

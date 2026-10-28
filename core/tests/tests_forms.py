@@ -13,7 +13,7 @@ from django.utils.formats import get_format, reset_format_cache
 from faker import Faker
 from PIL import Image
 
-from core import models
+from core import forms, models
 
 
 class FormsTestCaseBase(TestCase):
@@ -305,6 +305,38 @@ class ChildFormsTestCase(FormsTestCaseBase):
         )
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, "Child entry deleted")
+
+
+class ArchivedChildFormsTestCase(FormsTestCaseBase):
+    @classmethod
+    def setUpClass(cls):
+        super(ArchivedChildFormsTestCase, cls).setUpClass()
+        cls.archived = models.Child.objects.create(
+            first_name="Archived", last_name="Child", birth_date=timezone.localdate()
+        )
+        cls.archived.archive()
+
+    def test_add_form_choices_exclude_archived(self):
+        form = forms.FeedingForm(user=self.user)
+        self.assertIn(self.child, form.fields["child"].queryset)
+        self.assertNotIn(self.archived, form.fields["child"].queryset)
+
+    def test_edit_form_choices_include_related_archived_child(self):
+        feeding = models.Feeding.objects.create(
+            child=self.archived,
+            start=timezone.localtime() - timezone.timedelta(hours=1),
+            end=timezone.localtime() - timezone.timedelta(minutes=55),
+            type="formula",
+            method="bottle",
+        )
+        form = forms.FeedingForm(user=self.user, instance=feeding)
+        self.assertIn(self.archived, form.fields["child"].queryset)
+        self.assertIn(self.child, form.fields["child"].queryset)
+
+    def test_single_active_child_is_preselected(self):
+        # One active child (self.child) and one archived one.
+        form = forms.FeedingForm(user=self.user)
+        self.assertEqual(form.initial["child"], self.child)
 
 
 class DiaperChangeFormsTestCase(FormsTestCaseBase):

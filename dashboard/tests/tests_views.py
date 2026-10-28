@@ -203,3 +203,83 @@ class DashboardCardPermissionsTestCase(TestCase):
                 pattern,
                 "the {} card offers an edit link to a read-only user".format(heading),
             )
+
+
+class DashboardArchivedChildrenTestCase(TestCase):
+    """Archived children do not occupy the dashboard, but a single active
+    child still triggers the redirect and a direct child dashboard works."""
+
+    def setUp(self):
+        call_command("migrate", verbosity=0)
+        self.c = HttpClient()
+        # The admin/admin superuser is seeded by the custom migrate command.
+        self.c.login(username="admin", password="admin")
+        # migrate commits inside the test transaction, so fixture names have
+        # to be unique across the test methods in this class.
+        self.suffix = self.id().split(".")[-1]
+
+    def test_archived_child_not_listed_on_dashboard(self):
+        # Two active children are required so the multi-child dashboard is
+        # rendered rather than redirecting to a single child dashboard.
+        active = Child.objects.create(
+            first_name="Active {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2020-01-01",
+        )
+        Child.objects.create(
+            first_name="Other {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2020-01-02",
+        )
+        archived = Child.objects.create(
+            first_name="Archived {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2018-01-01",
+        )
+        archived.archive()
+
+        page = self.c.get("/dashboard/")
+        self.assertEqual(page.status_code, 200)
+        content = page.content.decode()
+        self.assertIn(active.first_name, content)
+        self.assertNotIn(archived.first_name, content)
+
+    def test_single_active_child_redirects(self):
+        active = Child.objects.create(
+            first_name="Lone {}".format(self.suffix),
+            last_name="Active",
+            birth_date="2020-01-01",
+        )
+        archived = Child.objects.create(
+            first_name="Old {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2018-01-01",
+        )
+        archived.archive()
+
+        page = self.c.get("/dashboard/")
+        self.assertEqual(page.url, "/children/{}/dashboard/".format(active.slug))
+
+    def test_all_archived_shows_notice(self):
+        archived = Child.objects.create(
+            first_name="Only {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2018-01-01",
+        )
+        archived.archive()
+
+        page = self.c.get("/dashboard/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("All children are archived.", page.content.decode())
+
+    def test_archived_child_dashboard_still_opens_directly(self):
+        archived = Child.objects.create(
+            first_name="Direct {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2018-01-01",
+        )
+        archived.archive()
+
+        page = self.c.get("/children/{}/dashboard/".format(archived.slug))
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Archived", page.content.decode())

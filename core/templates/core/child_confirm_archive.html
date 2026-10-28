@@ -1,0 +1,32 @@
+{% extends "babybuddy/page.html" %}
+{% load i18n %}
+{% block title %}
+    {% trans "Archive Child" %}
+{% endblock %}
+{% block breadcrumbs %}
+    <li class="breadcrumb-item">
+        <a href="{% url 'core:child-list' %}">{% trans "Children" %}</a>
+    </li>
+    <li class="breadcrumb-item fw-bold">
+        <a href="{% url 'core:child' object.slug %}">{{ object }}</a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">{% trans "Archive" %}</li>
+{% endblock %}
+{% block content %}
+    <form role="form" method="post">
+        {% csrf_token %}
+        <h1>{% trans "Archive" %} {{ object }}</h1>
+        <p class="lead">
+            {% trans "Archiving hides this child from the dashboard and from the child selector when adding new entries." %}
+        </p>
+        <ul>
+            <li>{% trans "No records (feedings, sleep, changes, notes, reports, etc.) are deleted." %}</li>
+            <li>{% trans "The child's timeline, reports and API entries remain available through their direct links." %}</li>
+            <li>{% trans "You can restore the child at any time from the children list." %}</li>
+        </ul>
+        <button type="submit" class="btn btn-warning">
+            <i class="icon-lock" aria-hidden="true"></i> {% trans "Archive Child" %}
+        </button>
+        <a href="{% url 'core:child-list' %}" class="btn btn-default">{% trans "Cancel" %}</a>
+    </form>
+{% endblock %}

@@ -15,6 +15,21 @@
             </a>
         {% endif %}
     </h1>
+    <p>
+        {% if show_archived %}
+            <a href="{% querystring archived=None %}"
+               class="btn btn-sm btn-outline-secondary">{% trans "Hide archived children" %}</a>
+        {% elif archived_count > 0 %}
+            <a href="{% querystring archived='1' %}"
+               class="btn btn-sm btn-outline-secondary">
+                {% blocktrans count counter=archived_count %}
+                    Show archived child ({{ counter }})
+                {% plural %}
+                    Show archived children ({{ counter }})
+                {% endblocktrans %}
+            </a>
+        {% endif %}
+    </p>
     {% include "babybuddy/filter.html" %}
     <div class="table-responsive">
         <table class="table table-borderless table-striped table-hover align-middle">
@@ -44,6 +59,9 @@
                         </td>
                         <th scope="row">
                             <a href="{% url 'core:child' child.slug %}">{{ child.first_name }}</a>
+                            {% if child.archived %}
+                                <span class="badge text-bg-secondary">{% trans "Archived" %}</span>
+                            {% endif %}
                         </th>
                         <td>{{ child.last_name }}</td>
                         <td>{{ child.birth_datetime }}</td>
@@ -53,13 +71,31 @@
                                  aria-label="{% trans "Actions" %}">
                                 {% if perms.core.change_child %}
                                     <a href="{% url 'core:child-update' child.slug %}"
-                                       class="btn btn-warning">
+                                       class="btn btn-warning"
+                                       title="{% trans "Edit" %}">
                                         <i class="icon-update" aria-hidden="true"></i>
                                     </a>
+                                    {% if child.archived %}
+                                        <form method="post"
+                                              action="{% url 'core:child-restore' child.slug %}"
+                                              class="d-inline">
+                                            {% csrf_token %}
+                                            <button type="submit" class="btn btn-success" title="{% trans "Restore" %}">
+                                                <i class="icon-refresh" aria-hidden="true"></i>
+                                            </button>
+                                        </form>
+                                    {% else %}
+                                        <a href="{% url 'core:child-archive' child.slug %}"
+                                           class="btn btn-outline-secondary"
+                                           title="{% trans "Archive" %}">
+                                            <i class="icon-lock" aria-hidden="true"></i>
+                                        </a>
+                                    {% endif %}
                                 {% endif %}
                                 {% if perms.core.delete_child %}
                                     <a href="{% url 'core:child-delete' child.slug %}"
-                                       class="btn btn-danger">
+                                       class="btn btn-danger"
+                                       title="{% trans "Delete" %}">
                                         <i class="icon-delete" aria-hidden="true"></i>
                                     </a>
                                 {% endif %}

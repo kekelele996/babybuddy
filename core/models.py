@@ -194,6 +194,17 @@ class BMI(models.Model):
         validate_date(self.date, "date")
 
 
+class ChildManager(models.Manager):
+    def active(self):
+        """Children that have not been archived."""
+        return self.get_queryset().filter(archived=False)
+
+
+class ActiveChildManager(ChildManager):
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+
 class Child(models.Model):
     model_name = "child"
     first_name = models.CharField(max_length=255, verbose_name=_("First name"))
@@ -223,10 +234,22 @@ class Child(models.Model):
     picture = models.ImageField(
         blank=True, null=True, upload_to="child/picture/", verbose_name=_("Picture")
     )
+    archived = models.BooleanField(
+        default=False,
+        verbose_name=_("Archived"),
+        help_text=_(
+            "Archived children are hidden from the dashboard and new entry "
+            "forms but their records remain available and can be restored."
+        ),
+    )
 
-    objects = models.Manager()
+    objects = ChildManager()
+    # Only non-archived children. Use `objects` when every child is needed
+    # (e.g. direct API access, reports or the timeline of an archived child).
+    active = ActiveChildManager()
 
     cache_key_count = "core.child.count"
+    cache_key_active_count = "core.child.active_count"
 
     class Meta:
         default_permissions = ("view", "add", "change", "delete")
@@ -241,10 +264,12 @@ class Child(models.Model):
         self.slug = slugify(self, allow_unicode=True)
         super(Child, self).save(*args, **kwargs)
         cache.set(self.cache_key_count, Child.objects.count(), None)
+        cache.set(self.cache_key_active_count, Child.active.count(), None)
 
     def delete(self, using=None, keep_parents=False):
         super(Child, self).delete(using, keep_parents)
         cache.set(self.cache_key_count, Child.objects.count(), None)
+        cache.set(self.cache_key_active_count, Child.active.count(), None)
 
     def name(self, reverse=False):
         if not self.last_name:
@@ -260,10 +285,25 @@ class Child(models.Model):
             )
         return self.birth_date
 
+    def archive(self):
+        """Hide the child from default selections without deleting any data."""
+        self.archived = True
+        self.save(update_fields=["archived"])
+
+    def restore(self):
+        """Make an archived child visible in default selections again."""
+        self.archived = False
+        self.save(update_fields=["archived"])
+
     @classmethod
     def count(cls):
         """Get a (cached) count of total number of Child instances."""
         return cache.get_or_set(cls.cache_key_count, Child.objects.count, None)
+
+    @classmethod
+    def active_count(cls):
+        """Get a (cached) count of non-archived Child instances."""
+        return cache.get_or_set(cls.cache_key_active_count, Child.active.count, None)
 
 
 class DiaperChange(models.Model):

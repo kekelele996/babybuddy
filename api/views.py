@@ -43,8 +43,16 @@ class ChildViewSet(viewsets.ModelViewSet):
         "slug",
         "birth_date",
         "birth_time",
+        "archived",
     )
-    ordering_fields = ("birth_date", "birth_time", "first_name", "last_name", "slug")
+    ordering_fields = (
+        "birth_date",
+        "birth_time",
+        "first_name",
+        "last_name",
+        "slug",
+        "archived",
+    )
     ordering = ["-birth_date", "-birth_time"]
 
 

@@ -371,3 +371,158 @@ class TimelinePermissionsTestCase(TestCase):
         content = page.content.decode()
         self.assertIn("Timeline Medication", content)
         self.assertIn("Timeline private note", content)
+
+
+class ChildArchiveViewsTestCase(TestCase):
+    """
+    Archiving hides a child from default selections (list, add forms, quick
+    timer) but never deletes data: direct timeline/report access keeps
+    working and the child can be restored.
+    """
+
+    def setUp(self):
+        call_command("migrate", verbosity=0)
+        # migrate commits inside the test transaction, so every fixture has
+        # to be unique across the test methods in this class. The admin user
+        # is seeded by the custom migrate command.
+        self.suffix = self.id().split(".")[-1]
+        self.c = HttpClient()
+        self.c.login(username="admin", password="admin")
+
+        self.active = models.Child.objects.create(
+            first_name="Active {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2020-01-01",
+        )
+        self.archived = models.Child.objects.create(
+            first_name="Archived {}".format(self.suffix),
+            last_name="Child",
+            birth_date="2018-01-01",
+        )
+        now = timezone.localtime()
+        self.feeding = models.Feeding.objects.create(
+            child=self.archived,
+            start=now - timezone.timedelta(hours=1),
+            end=now - timezone.timedelta(minutes=55),
+            type="formula",
+            method="bottle",
+        )
+        self.archived.archive()
+
+    def test_list_hides_archived_by_default(self):
+        page = self.c.get("/children/")
+        self.assertEqual(page.status_code, 200)
+        self.assertFalse(page.context["show_archived"])
+        self.assertGreaterEqual(page.context["archived_count"], 1)
+        content = page.content.decode()
+        self.assertIn(self.active.first_name, content)
+        self.assertNotIn(self.archived.first_name, content)
+        # The toggle keeps a single, well-formed query string.
+        self.assertIn('href="?archived=1"', content)
+        self.assertNotIn("??archived", content)
+
+    def test_list_shows_archived_on_demand(self):
+        page = self.c.get("/children/", {"archived": "1"})
+        self.assertTrue(page.context["show_archived"])
+        content = page.content.decode()
+        self.assertIn(self.active.first_name, content)
+        self.assertIn(self.archived.first_name, content)
+        self.assertIn("/children/{}/restore/".format(self.archived.slug), content)
+
+    def test_archive_confirmation_page(self):
+        page = self.c.get("/children/{}/archive/".format(self.active.slug))
+        self.assertEqual(page.status_code, 200)
+        content = page.content.decode()
+        self.assertIn("Archive Child", content)
+        # The confirmation explicitly states that nothing is deleted.
+        self.assertIn("No records", content)
+
+    def test_archive_action(self):
+        response = self.c.post("/children/{}/archive/".format(self.active.slug))
+        self.assertRedirects(response, "/children/")
+        self.active.refresh_from_db()
+        self.assertTrue(self.active.archived)
+        # The child and its data are still in the database.
+        self.assertTrue(models.Child.objects.filter(pk=self.active.pk).exists())
+        self.assertFalse(models.Child.active.filter(pk=self.active.pk).exists())
+        self.assertTrue(models.Feeding.objects.filter(pk=self.feeding.pk).exists())
+
+    def test_restore_action(self):
+        child_url = "/children/{}/".format(self.archived.slug)
+        active_before = models.Child.active.count()
+        response = self.c.post(
+            "/children/{}/restore/".format(self.archived.slug),
+            {"next": child_url},
+        )
+        self.assertRedirects(response, child_url)
+        self.archived.refresh_from_db()
+        self.assertFalse(self.archived.archived)
+        self.assertEqual(models.Child.active.count(), active_before + 1)
+
+    def test_restore_rejects_unsafe_redirect(self):
+        response = self.c.post(
+            "/children/{}/restore/".format(self.archived.slug),
+            {"next": "https://example.com/elsewhere"},
+        )
+        self.assertRedirects(response, "/children/")
+
+    def test_restore_requires_post(self):
+        page = self.c.get("/children/{}/restore/".format(self.archived.slug))
+        self.assertEqual(page.status_code, 405)
+
+    def test_archived_child_pages_remain_readable(self):
+        page = self.c.get("/children/{}/".format(self.archived.slug))
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Archived", page.content.decode())
+        page = self.c.get("/children/{}/dashboard/".format(self.archived.slug))
+        self.assertEqual(page.status_code, 200)
+        page = self.c.get("/children/{}/reports".format(self.archived.slug))
+        self.assertEqual(page.status_code, 200)
+        # The feeding history is still there.
+        self.assertTrue(models.Feeding.objects.filter(child=self.archived).exists())
+
+    def test_add_form_hides_archived_child_choices(self):
+        page = self.c.get("/feedings/add/")
+        self.assertEqual(page.status_code, 200)
+        choices = page.context["form"].fields["child"].queryset
+        self.assertIn(self.active, choices)
+        self.assertNotIn(self.archived, choices)
+
+    def test_prefilled_add_form_keeps_archived_child_choice(self):
+        page = self.c.get("/feedings/add/", {"child": self.archived.slug})
+        self.assertEqual(page.context["form"].initial["child"].pk, self.archived.pk)
+        choices = page.context["form"].fields["child"].queryset
+        self.assertIn(self.archived, choices)
+
+    def test_edit_form_keeps_the_related_archived_child(self):
+        page = self.c.get("/feedings/{}/".format(self.feeding.id))
+        self.assertEqual(page.status_code, 200)
+        choices = page.context["form"].fields["child"].queryset
+        self.assertIn(self.archived, choices)
+        self.assertIn(self.active, choices)
+
+    def test_quick_timer_nav_uses_active_children_only(self):
+        page = self.c.get("/children/")
+        content = page.content.decode()
+        # One active child means the single quick-timer button, not a list
+        # containing the archived child.
+        self.assertNotIn('name="child" value="{}"'.format(self.archived.pk), content)
+
+    def test_quick_timer_auto_assigns_the_active_child(self):
+        self.c.post("/timers/add/quick/")
+        timer = models.Timer.objects.filter(user__username="admin").latest("id")
+        self.assertEqual(timer.child, self.active)
+
+    def test_timeline_redirects_to_single_active_child(self):
+        response = self.c.get("/timeline/")
+        self.assertRedirects(response, "/children/{}/".format(self.active.slug))
+
+    def test_archive_requires_change_permission(self):
+        self.c.logout()
+        username = "readonly-{}".format(self.suffix)
+        get_user_model().objects.create_user(username=username, password="readonly")
+        self.c.login(username=username, password="readonly")
+        page = self.c.post("/children/{}/archive/".format(self.active.slug))
+        self.assertEqual(page.status_code, 403)
+        self.active.refresh_from_db()
+        self.assertFalse(self.active.archived)

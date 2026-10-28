@@ -174,6 +174,7 @@ class ChildSerializer(serializers.HyperlinkedModelSerializer):
             "due_date",
             "slug",
             "picture",
+            "archived",
         )
         lookup_field = "slug"
 

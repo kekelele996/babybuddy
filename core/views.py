@@ -5,12 +5,24 @@ from django.db.models import Count
 from django.db.models.functions import Lower
 from django.forms import Form, ValidationError
 from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
 from django.views.generic.base import RedirectView, TemplateView
-from django.views.generic.detail import DetailView
-from django.views.generic.edit import CreateView, UpdateView, DeleteView, FormView
+from django.views.generic.detail import (
+    BaseDetailView,
+    DetailView,
+    SingleObjectTemplateResponseMixin,
+)
+from django.views.generic.edit import (
+    CreateView,
+    UpdateView,
+    DeleteView,
+    FormMixin,
+    FormView,
+)
 
 from babybuddy.mixins import LoginRequiredMixin, PermissionRequiredMixin
 from babybuddy.views import BabyBuddyFilterView, BabyBuddyPaginatedView
@@ -119,11 +131,30 @@ class BMIDelete(CoreDeleteView):
     success_url = reverse_lazy("core:bmi-list")
 
 
+def _show_archived_parameter(request):
+    """Whether the child list was requested with archived children shown."""
+    return request.GET.get("archived", "") in ("1", "true", "True", "yes", "on")
+
+
 class ChildList(PermissionRequiredMixin, BabyBuddyPaginatedView, BabyBuddyFilterView):
     model = models.Child
     template_name = "core/child_list.html"
     permission_required = ("core.view_child",)
     filterset_fields = ("first_name", "last_name")
+
+    def get_queryset(self):
+        # Active children are shown by default. Archived ones are only
+        # included on demand via the "archived" query parameter.
+        queryset = super().get_queryset()
+        if not _show_archived_parameter(self.request):
+            queryset = queryset.filter(archived=False)
+        return queryset
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["show_archived"] = _show_archived_parameter(self.request)
+        context["archived_count"] = models.Child.objects.filter(archived=True).count()
+        return context
 
 
 class ChildAdd(CoreAddView):
@@ -166,6 +197,62 @@ class ChildDelete(CoreUpdateView):
             "model": self.model._meta.verbose_name.title()
         }
         return success_message % cleaned_data
+
+
+class ChildArchive(
+    PermissionRequiredMixin,
+    FormMixin,
+    SingleObjectTemplateResponseMixin,
+    BaseDetailView,
+):
+    """
+    Confirmation page and action for archiving a child. Archiving only flips
+    the `archived` flag; no entries are deleted.
+    """
+
+    model = models.Child
+    form_class = Form
+    template_name = "core/child_confirm_archive.html"
+    permission_required = ("core.change_child",)
+
+    def post(self, request, *args, **kwargs):
+        child = self.get_object()
+        form = self.get_form()
+        if form.is_valid():
+            if not child.archived:
+                child.archive()
+                messages.success(
+                    request,
+                    _(
+                        "%(child)s was archived. The child is hidden from the "
+                        "dashboard and new entries, but all records are kept "
+                        "and can be restored."
+                    )
+                    % {"child": child},
+                )
+            return HttpResponseRedirect(reverse("core:child-list"))
+        return self.form_invalid(form)
+
+
+class ChildRestore(PermissionRequiredMixin, RedirectView):
+    """Restore an archived child so it reappears in default selections."""
+
+    http_method_names = ["post"]
+    permission_required = ("core.change_child",)
+
+    def post(self, request, *args, **kwargs):
+        child = get_object_or_404(models.Child, slug=kwargs["slug"], archived=True)
+        child.restore()
+        messages.success(request, _("%(child)s was restored.") % {"child": child})
+        next_url = request.POST.get("next", "")
+        if not url_has_allowed_host_and_scheme(
+            url=next_url,
+            allowed_hosts={request.get_host()},
+            require_https=request.is_secure(),
+        ):
+            next_url = reverse("core:child-list")
+        self.url = next_url
+        return super(ChildRestore, self).post(request, *args, **kwargs)
 
 
 class DiaperChangeList(
@@ -498,12 +585,12 @@ class TemperatureDelete(CoreDeleteView):
 class Timeline(LoginRequiredMixin, TemplateView):
     template_name = "timeline/timeline.html"
 
-    # Show the overall timeline or a child timeline if one Child instance.
+    # Show the overall timeline or a child timeline if one active Child.
     def get(self, request, *args, **kwargs):
-        children = models.Child.objects.count()
+        children = models.Child.active_count()
         if children == 1:
             return HttpResponseRedirect(
-                reverse("core:child", args={models.Child.objects.first().slug})
+                reverse("core:child", args={models.Child.active.first().slug})
             )
         return super(Timeline, self).get(request, *args, **kwargs)
 
@@ -567,9 +654,9 @@ class TimerAddQuick(PermissionRequiredMixin, RedirectView):
         child = models.Child.objects.get(pk=child_id) if child_id else None
         if child:
             instance.child = child
-        # Add child relationship if there is only Child instance.
-        elif models.Child.count() == 1:
-            instance.child = models.Child.objects.first()
+        # Add child relationship if there is only one active Child instance.
+        elif models.Child.active_count() == 1:
+            instance.child = models.Child.active.first()
         instance.save()
         self.url = request.GET.get(
             "next", reverse("core:timer-detail", args={instance.id})

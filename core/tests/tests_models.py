@@ -102,6 +102,64 @@ class ChildTestCase(TestCase):
         )
 
 
+class ChildArchiveTestCase(TestCase):
+    def setUp(self):
+        call_command("migrate", verbosity=0)
+        self.active = models.Child.objects.create(
+            first_name="Active", last_name="Child", birth_date=timezone.localdate()
+        )
+        self.archived = models.Child.objects.create(
+            first_name="Archived",
+            last_name="Child",
+            birth_date=timezone.localdate(),
+            archived=True,
+        )
+        self.note = models.Note.objects.create(
+            child=self.archived, note="Keep me", time=timezone.localtime()
+        )
+
+    def test_new_children_default_to_active(self):
+        self.assertFalse(self.active.archived)
+        self.assertIn(self.active, models.Child.active.all())
+
+    def test_active_manager_excludes_archived(self):
+        self.assertIn(self.active, models.Child.active.all())
+        self.assertNotIn(self.archived, models.Child.active.all())
+        # The default manager still returns every child.
+        self.assertIn(self.archived, models.Child.objects.all())
+
+    def test_active_count(self):
+        self.assertEqual(models.Child.objects.count(), 2)
+        self.assertEqual(models.Child.active_count(), 1)
+        self.active.archive()
+        self.assertEqual(models.Child.active_count(), 0)
+        self.assertEqual(models.Child.count(), 2)
+
+    def test_archive_and_restore(self):
+        self.active.archive()
+        self.active.refresh_from_db()
+        self.assertTrue(self.active.archived)
+        self.assertNotIn(self.active, models.Child.active.all())
+
+        self.active.restore()
+        self.active.refresh_from_db()
+        self.assertFalse(self.active.archived)
+        self.assertIn(self.active, models.Child.active.all())
+
+    def test_archiving_keeps_related_records(self):
+        self.archived.archive()
+        self.assertEqual(models.Child.objects.count(), 2)
+        self.assertTrue(
+            models.Note.objects.filter(pk=self.note.pk, child=self.archived).exists()
+        )
+        # Restoring brings the child and its history back intact.
+        self.archived.restore()
+        self.assertEqual(
+            self.archived.note.first().note,
+            "Keep me",
+        )
+
+
 class DiaperChangeTestCase(TestCase):
     def setUp(self):
         call_command("migrate", verbosity=0)

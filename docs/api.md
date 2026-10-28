@@ -91,9 +91,16 @@ curl -X GET https://[...]/api/children/gregory-hill/ -H 'Authorization: Token [.
   "last_name": "Hill",
   "birth_date": "2020-02-11",
   "slug": "gregory-hill",
-  "picture": null
+  "picture": null,
+  "archived": false
 }
 ```
+
+The `archived` field marks children that have been archived in the web UI.
+Archived children are hidden there from the dashboard and new entry forms, but
+the API keeps returning them (including all of their entries) and entries can
+still be created for them. Filter the list with `?archived=true` or
+`?archived=false` when needed.
 
 ```shell
 curl -X GET https://[...]/api/sleep/1/ -H 'Authorization: Token [...]'
@@ -168,9 +175,13 @@ following example describes the `/api/children` endpoint:
         }
     },
     "filters": [
+        "id",
         "first_name",
         "last_name",
-        "slug"
+        "slug",
+        "birth_date",
+        "birth_time",
+        "archived"
     ]
 }
 ```

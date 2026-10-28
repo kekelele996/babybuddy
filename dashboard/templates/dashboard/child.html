@@ -11,6 +11,23 @@
     <li class="breadcrumb-item active" aria-current="page">{% trans "Dashboard" %}</li>
 {% endblock %}
 {% block content %}
+    {% if object.archived %}
+        <div class="alert alert-secondary">
+            <span class="badge text-bg-secondary me-1">{% trans "Archived" %}</span>
+            {% trans "This child is hidden from the dashboard and new entry forms. Records are kept and can be restored." %}
+            {% if perms.core.change_child %}
+                <form method="post"
+                      action="{% url 'core:child-restore' object.slug %}"
+                      class="d-inline-block mt-2 mt-md-0">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{{ request.path }}" />
+                    <button type="submit" class="btn btn-sm btn-success ms-2">
+                        <i class="icon-refresh" aria-hidden="true"></i> {% trans "Restore" %}
+                    </button>
+                </form>
+            {% endif %}
+        </div>
+    {% endif %}
     <div id="dashboard-child"
          class="row"
          data-masonry='{"percentPosition": true }'>

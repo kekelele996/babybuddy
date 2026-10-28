@@ -12,6 +12,14 @@
             <div class="col-lg-4 col-md-4 col-sm-12">{% card_timer_list %}</div>
         {% endif %}
         <div class="col-lg-8 col-md-8 col-sm-12">
+            {% if not objects %}
+                <div class="alert alert-secondary">
+                    {% trans "All children are archived." %}
+                    {% if perms.core.view_child %}
+                        <a href="{% url 'core:child-list' %}?archived=1">{% trans "Show archived children" %}</a>
+                    {% endif %}
+                </div>
+            {% endif %}
             <div class="row">
                 {% for object in objects %}
                     <div class="col-lg-4 col-md-6 col-sm-6 col-xs-2 mb-4">

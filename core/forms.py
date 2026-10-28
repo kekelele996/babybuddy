@@ -4,6 +4,7 @@ from django.forms import widgets
 from django.conf import settings
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
@@ -34,7 +35,9 @@ def set_initial_values(kwargs, form_type):
     if not kwargs.get("initial"):
         kwargs.update(initial={})
 
-    # Set Child based on `child` kwarg or single Chile database.
+    # Set Child based on `child` kwarg or single Chile database. An archived
+    # child passed explicitly via `child` is still pre-selected (e.g. a link
+    # from its timeline), but the single-child default only uses active ones.
     child_slug = kwargs.get("child", None)
     if child_slug:
         kwargs["initial"].update(
@@ -42,8 +45,8 @@ def set_initial_values(kwargs, form_type):
                 "child": models.Child.objects.filter(slug=child_slug).first(),
             }
         )
-    elif models.Child.count() == 1:
-        kwargs["initial"].update({"child": models.Child.objects.first()})
+    elif models.Child.active_count() == 1:
+        kwargs["initial"].update({"child": models.Child.active.first()})
 
     # Set start and end time based on Timer from `timer` kwarg.
     timer_id = kwargs.get("timer", None)
@@ -100,7 +103,30 @@ class CoreModelForm(forms.ModelForm):
         self.timer_id = kwargs.get("timer", None)
         kwargs = set_initial_values(kwargs, type(self))
         super(CoreModelForm, self).__init__(*args, **kwargs)
+        self.limit_child_choices()
         self.add_timer_field()
+
+    def limit_child_choices(self):
+        """
+        Offer active children in the child selector, but keep the currently
+        related child available so entries of an archived child remain
+        viewable and editable after archiving.
+        """
+        field = self.fields.get("child")
+        if field is None or not hasattr(field, "queryset"):
+            return
+
+        keep = []
+        instance = getattr(self, "instance", None)
+        if instance and getattr(instance, "child_id", None):
+            keep.append(instance.child_id)
+        initial_child = self.initial.get("child")
+        if isinstance(initial_child, models.Child):
+            keep.append(initial_child.pk)
+        elif initial_child:
+            keep.append(initial_child)
+
+        field.queryset = models.Child.objects.filter(Q(archived=False) | Q(pk__in=keep))
 
     def add_timer_field(self):
         """

@@ -24,6 +24,23 @@
            href="{% url 'core:child-update' object.slug %}"
            title="{% trans "Edit" %}"
            role="button"><i class="icon-update" aria-hidden="true"></i></a>
+        {% if object.archived %}
+            <form method="post"
+                  action="{% url 'core:child-restore' object.slug %}"
+                  class="d-inline">
+                {% csrf_token %}
+                <button type="submit"
+                        class="btn d-none d-md-inline-block"
+                        title="{% trans "Restore" %}">
+                    <i class="icon-refresh" aria-hidden="true"></i>
+                </button>
+            </form>
+        {% else %}
+            <a class="btn d-none d-md-inline-block"
+               href="{% url 'core:child-archive' object.slug %}"
+               title="{% trans "Archive" %}"
+               role="button"><i class="icon-lock" aria-hidden="true"></i></a>
+        {% endif %}
     {% endif %}
     {% if perms.core.delete_child %}
         <a class="btn d-none d-md-inline-block"

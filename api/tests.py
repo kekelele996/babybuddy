@@ -152,6 +152,7 @@ class ChildAPITestCase(TestBase.BabyBuddyAPITestCaseBase):
                 "due_date": None,
                 "slug": "fake-child",
                 "picture": None,
+                "archived": False,
             },
         )
 
@@ -166,6 +167,44 @@ class ChildAPITestCase(TestBase.BabyBuddyAPITestCaseBase):
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         obj = models.Child.objects.get(pk=response.data["id"])
         self.assertEqual(obj.first_name, data["first_name"])
+
+    def test_archived_child_is_filterable_but_still_readable(self):
+        child = models.Child.objects.get(slug="fake-child")
+        child.archive()
+
+        # Unfiltered list results keep archived children (API access).
+        response = self.client.get(self.endpoint)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        slugs = [r["slug"] for r in response.data["results"]]
+        self.assertIn("fake-child", slugs)
+        self.assertTrue(all("archived" in r for r in response.data["results"]))
+
+        # The archived flag can be used to filter the list.
+        response = self.client.get(self.endpoint, {"archived": "true"})
+        slugs = [r["slug"] for r in response.data["results"]]
+        self.assertEqual(slugs, ["fake-child"])
+
+        response = self.client.get(self.endpoint, {"archived": "false"})
+        slugs = [r["slug"] for r in response.data["results"]]
+        self.assertNotIn("fake-child", slugs)
+
+        # Direct retrieval by slug still works.
+        response = self.client.get("{}{}/".format(self.endpoint, "fake-child"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["archived"])
+
+    def test_entry_can_still_be_created_for_archived_child(self):
+        models.Child.objects.get(slug="fake-child").archive()
+        data = {
+            "child": 1,
+            "note": "Backfilled note",
+            "time": timezone.localtime().isoformat(),
+        }
+        response = self.client.post(reverse("api:note-list"), data, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(
+            models.Note.objects.filter(child_id=1, note="Backfilled note").exists()
+        )
 
     def test_patch(self):
         endpoint = "{}{}/".format(self.endpoint, "fake-child")
